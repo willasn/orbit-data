@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="tile" x1="112" y1="100" x2="901" y2="926" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#243D65"/>
+      <stop offset=".52" stop-color="#142746"/>
+      <stop offset="1" stop-color="#0B142C"/>
+    </linearGradient>
+    <radialGradient id="light" cx="0" cy="0" r="1" gradientTransform="translate(303 210) rotate(54) scale(777)">
+      <stop stop-color="#367894" stop-opacity=".55"/>
+      <stop offset="1" stop-color="#367894" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="orbit" x1="196" y1="668" x2="831" y2="349" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#44DECF"/>
+      <stop offset=".53" stop-color="#6EC9F9"/>
+      <stop offset="1" stop-color="#9A9AFF"/>
+    </linearGradient>
+    <linearGradient id="disk" x1="364" y1="340" x2="648" y2="692" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ECFFFC"/>
+      <stop offset=".48" stop-color="#A0E4F2"/>
+      <stop offset="1" stop-color="#79A7ED"/>
+    </linearGradient>
+    <linearGradient id="top" x1="386" y1="366" x2="631" y2="470" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F4FFFD"/>
+      <stop offset="1" stop-color="#A2ECF2"/>
+    </linearGradient>
+    <clipPath id="tile-shape"><rect x="92" y="92" width="840" height="840" rx="204"/></clipPath>
+  </defs>
+  <g clip-path="url(#tile-shape)">
+    <rect x="92" y="92" width="840" height="840" fill="url(#tile)"/>
+    <rect x="92" y="92" width="840" height="840" fill="url(#light)"/>
+    <circle cx="512" cy="512" r="316" fill="none" stroke="#AFDCFB" stroke-opacity=".08" stroke-width="2"/>
+    <ellipse cx="512" cy="512" rx="347" ry="208" transform="rotate(-30 512 512)" fill="none" stroke="#65AEDE" stroke-opacity=".14" stroke-width="36"/>
+    <ellipse cx="512" cy="512" rx="347" ry="208" transform="rotate(-30 512 512)" fill="none" stroke="url(#orbit)" stroke-width="21"/>
+    <circle cx="214" cy="682" r="30" fill="#73E8DC"/>
+    <circle cx="815" cy="347" r="19" fill="#B3AEFF"/>
+    <circle cx="512" cy="518" r="186" fill="#172C4D" stroke="#A2DCED" stroke-opacity=".23" stroke-width="4"/>
+    <path d="M381 417c0-30 58-54 131-54s131 24 131 54v210c0 31-58 55-131 55s-131-24-131-55V417Z" fill="url(#disk)"/>
+    <path d="M381 487c0 30 58 54 131 54s131-24 131-54M381 566c0 30 58 54 131 54s131-24 131-54" fill="none" stroke="#305C87" stroke-opacity=".65" stroke-width="11"/>
+    <ellipse cx="512" cy="417" rx="131" ry="54" fill="url(#top)"/>
+    <path d="M405 415c21-19 61-30 107-30" fill="none" stroke="#FFFFFF" stroke-opacity=".63" stroke-width="9" stroke-linecap="round"/>
+    <circle cx="622" cy="779" r="7" fill="#81DEED" fill-opacity=".8"/>
+  </g>
+  <rect x="93" y="93" width="838" height="838" rx="203" fill="none" stroke="#C0E9FA" stroke-opacity=".15" stroke-width="2"/>
+</svg>

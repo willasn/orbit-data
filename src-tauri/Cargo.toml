@@ -1,0 +1,55 @@
+[package]
+name = "orbit-data"
+version = "0.1.0"
+description = "OrbitData - AI 原生数据管理工具"
+edition = "2021"
+
+[lib]
+name = "orbit_data_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio",
+  "tls-rustls",
+  "mysql",
+  "postgres",
+  "chrono",
+  "json",
+  "rust_decimal",
+  "uuid",
+] }
+redis = { version = "0.27", default-features = false, features = ["tokio-comp", "acl"] }
+# SQL Server（TDS）：sqlx 自 0.7 起移除 mssql 驱动，直接用 tiberius
+tiberius = { version = "0.13", default-features = false, features = ["tds73", "rustls", "chrono", "rust_decimal"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+rdkafka = { version = "0.39", features = ["cmake-build", "ssl-vendored"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+futures-util = "0.3"
+urlencoding = "2"
+rust_decimal = "1"
+uuid = "1"
+chrono = "0.4"
+
+[profile.dev]
+# 自己的代码保留 file:line(panic 回溯可用),但去掉变量级调试信息,大幅减小体积
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+# 运行时依赖不生成调试信息(target/debug 体积的大头)
+# 注:build script / proc-macro 走 Cargo 默认的 build-override,已默认 debug = false
+debug = false
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true
