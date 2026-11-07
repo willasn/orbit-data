@@ -35,6 +35,8 @@ tokio-util = { version = "0.7", features = ["compat"] }
 rdkafka = { version = "0.39", features = ["cmake-build", "ssl-vendored"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 futures-util = "0.3"
+# 更新源版本比较（GitHub Releases / R2 两个 latest.json 取较大者）
+semver = "1"
 urlencoding = "2"
 rust_decimal = "1"
 uuid = "1"

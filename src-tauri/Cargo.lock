@@ -2813,6 +2813,7 @@ dependencies = [
  "rumqttc",
  "rust_decimal",
  "rustls",
+ "semver",
  "serde",
  "serde_json",
  "sqlx",

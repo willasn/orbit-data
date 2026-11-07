@@ -110,8 +110,8 @@
 - [x] 前端轻依赖(React + Zustand + lucide-react,无重型 UI 库)
 - [x] 前端产物 gzip 约 60 KB
 - [x] 应用图标正式设计(圆角轨道与数据库主题，适配桌面及移动端)
-- [x] 自动更新(tauri-plugin-updater)：启动时检查 GitHub Releases 的 `latest.json`，发现新版本右下角提示，确认后下载、校验签名、安装并重启
-- [x] 打 tag 自动发布(GitHub Actions `v*`)：构建 macOS / Windows 安装包并上传 Release，同时生成更新所需的签名产物
+- [x] 自动更新(tauri-plugin-updater)：启动时并行检查 GitHub Releases 与 Cloudflare R2 的 `latest.json`（总限时 5 秒，取版本较高者；单源可用时用单源，均不可用提示网络超时），发现新版本右下角提示，确认后下载、校验签名、安装并重启
+- [x] 打 tag 自动发布(GitHub Actions `v*`)：构建 macOS / Windows 安装包并上传 Release，同时生成更新所需的签名产物，并把安装包与 `latest.json` 同步到 R2 的 `orbit-data/` 前缀
 - [ ] 多语言(i18n)
 
 ## 8. Kafka 消息工作区（v0.1.2，2026-10-09）
