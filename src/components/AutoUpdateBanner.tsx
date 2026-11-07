@@ -20,6 +20,7 @@ interface ProgressPayload {
 export default function AutoUpdateBanner() {
   const [info, setInfo] = useState<UpdateInfo | null>(null);
   const [checking, setChecking] = useState(true);
+  const [checkError, setCheckError] = useState("");
   const [downloading, setDownloading] = useState(false);
   const [percent, setPercent] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -32,8 +33,9 @@ export default function AutoUpdateBanner() {
       .then((res) => {
         if (alive) setInfo(res);
       })
-      .catch(() => {
-        /* 自动检查失败不打扰用户：静默忽略，仍可在下次启动时重试 */
+      .catch((e) => {
+        /* GitHub 与 R2 都没查到（通常是网络超时）时给出提示，避免静默失败 */
+        if (alive) setCheckError(String(e));
       })
       .finally(() => {
         if (alive) setChecking(false);
@@ -64,7 +66,28 @@ export default function AutoUpdateBanner() {
     }
   };
 
-  if (checking || dismissed || !info) return null;
+  if (checking || dismissed) return null;
+
+  // 两个更新源都不可用：提示网络超时，不再静默失败。
+  if (!info) {
+    if (!checkError) return null;
+    return (
+      <div className="update-banner" role="status">
+        <div className="update-banner-text">
+          <strong>检查更新失败</strong>
+          <span className="muted">
+            {checkError.replace(/^更新检查失败：/, "")}
+          </span>
+        </div>
+        <div className="update-banner-actions">
+          <button className="btn" type="button" onClick={() => setDismissed(true)}>
+            知道了
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   const failed = !downloading && !!error && info.has_update;
   if (!info.has_update && !failed) return null;
 
