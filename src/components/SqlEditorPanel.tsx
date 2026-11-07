@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Play, Save, WandSparkles, Trash2 } from "lucide-react";
+import { Ban, Play, Save, WandSparkles, Trash2 } from "lucide-react";
 import { useStore } from "../store";
 import DataGrid from "./DataGrid";
 import Chart from "./Chart";
@@ -21,7 +21,7 @@ function formatSql(sql: string): string {
   return out.trim();
 }
 
-export default function SqlEditorPanel() {
+export default function SqlEditorPanel({ disabled = false }: { disabled?: boolean }) {
   const {
     config,
     activeConnId,
@@ -61,6 +61,19 @@ export default function SqlEditorPanel() {
     const t = tabs.find((x) => x.id === activeTabId);
     return t?.kind === "result" ? t.result : null;
   }, [resultView, activeConnId, editorSql]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 专属工作区（MQTT / Kafka 等）不使用右侧 SQL 编辑器，整块置灰提示
+  if (disabled) {
+    return (
+      <div className="sql-panel sql-panel-disabled" style={{ width: rightWidth }} aria-disabled="true">
+        <div className="panel-header"><span>SQL 编辑器</span></div>
+        <div className="sql-panel-disabled-body">
+          <Ban size={24} />
+          <p>当前页面不使用右侧面板</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!conn) {
     return (
@@ -128,6 +141,7 @@ export default function SqlEditorPanel() {
           value={editorSql}
           onChange={(e) => setEditorSql(e.target.value)}
           onKeyDown={(e) => {
+            if (e.nativeEvent.isComposing || e.keyCode === 229) return;
             if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
               e.preventDefault();
               runSql(editorSql);

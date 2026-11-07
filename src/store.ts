@@ -13,6 +13,8 @@ import type {
 } from "./types";
 
 const connectionEpochs = new Map<string, number>();
+/** 同一连接并发触发连接时复用同一次握手（双击打开消息工作区会同时触发选中与打开） */
+const pendingConnects = new Map<string, Promise<void>>();
 let idSeq = 0;
 const nextId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${idSeq++}`;
 
@@ -334,26 +336,36 @@ export const useStore = create<Store>((set, get) => ({
 
   /** 建立连接:真实握手验证一次,成功后左栏显示「已连接」 */
   connectDb: async (id) => {
-    const conn = activeConn(get().config, id);
-    if (!conn) return;
-    const epoch = (connectionEpochs.get(id) ?? 0) + 1;
-    connectionEpochs.set(id, epoch);
+    const running = pendingConnects.get(id);
+    if (running) return running;
+    const task = (async () => {
+      const conn = activeConn(get().config, id);
+      if (!conn) return;
+      const epoch = (connectionEpochs.get(id) ?? 0) + 1;
+      connectionEpochs.set(id, epoch);
+      try {
+        const detail = await api.connectDb(conn);
+        if (connectionEpochs.get(id) !== epoch || activeConn(get().config, id) !== conn) return;
+        set({
+          connSessions: {
+            ...get().connSessions,
+            [id]: { db_type: conn.db_type, detail, since_ms: Date.now() },
+          },
+        });
+        get().showToast(`已连接 ${conn.name}`);
+      } catch (e) {
+        if (connectionEpochs.get(id) !== epoch || activeConn(get().config, id) !== conn) return;
+        const connSessions = { ...get().connSessions };
+        delete connSessions[id];
+        set({ connSessions });
+        get().showToast(`连接失败: ${e}`);
+      }
+    })();
+    pendingConnects.set(id, task);
     try {
-      const detail = await api.connectDb(conn);
-      if (connectionEpochs.get(id) !== epoch || activeConn(get().config, id) !== conn) return;
-      set({
-        connSessions: {
-          ...get().connSessions,
-          [id]: { db_type: conn.db_type, detail, since_ms: Date.now() },
-        },
-      });
-      get().showToast(`已连接 ${conn.name}`);
-    } catch (e) {
-      if (connectionEpochs.get(id) !== epoch || activeConn(get().config, id) !== conn) return;
-      const connSessions = { ...get().connSessions };
-      delete connSessions[id];
-      set({ connSessions });
-      get().showToast(`连接失败: ${e}`);
+      await task;
+    } finally {
+      pendingConnects.delete(id);
     }
   },
 
@@ -361,6 +373,9 @@ export const useStore = create<Store>((set, get) => ({
   disconnectDb: async (id) => {
     const conn = activeConn(get().config, id);
     connectionEpochs.set(id, (connectionEpochs.get(id) ?? 0) + 1);
+    // 等待进行中的握手结束，避免断开后又被握手结果重新建连
+    const pending = pendingConnects.get(id);
+    if (pending) await pending.catch(() => undefined);
     get().tabs.filter((t) => t.kind === "messaging" && t.connId === id).forEach((t) => get().closeTab(t.id));
     const connSessions = { ...get().connSessions };
     delete connSessions[id];
@@ -684,8 +699,9 @@ export const useStore = create<Store>((set, get) => ({
     if (!get().connSessions[connId] || !activeConn(get().config, connId)) return;
     const existing = get().tabs.find((t) => t.kind === "messaging" && t.connId === connId && t.topic === topic);
     const id = existing?.id ?? nextId("messaging");
+    const label = driverOf(conn.db_type).label;
     set({ tabs: existing ? get().tabs : [...get().tabs, { id, kind: "messaging", connId, topic,
-      title: topic ? `Kafka · ${topic}` : `Kafka · ${conn.name}` }], activeTabId: id, activeConnId: connId, view: "chat" });
+      title: topic ? `${label} · ${topic}` : `${label} · ${conn.name}` }], activeTabId: id, activeConnId: connId, view: "chat" });
   },
 
   openChatTab: (sessionId) => {
@@ -778,7 +794,7 @@ export const useStore = create<Store>((set, get) => ({
           (tree?.selectedTable ? `,当前${driver.tableLabel}: ${tree.selectedTable}` : "") +
           (tree?.selectedColumn ? `,当前字段: ${tree.selectedColumn}` : "") + "。"
       );
-      if (driver.caps.messaging) sysParts.push("当前为 Kafka 消息中间件，不支持 SQL。仅解释元数据、配置和排障建议；消息正文不会自动提供。生产消息、删除 Topic 和重置消费位点必须在消息工作区由用户显式确认，不得自动执行。");
+      if (driver.caps.messaging) sysParts.push(`当前为 ${driver.label} 消息中间件，不支持 SQL。仅解释配置与排障建议；消息正文不会自动提供。发布消息、删除 Topic 和重置消费位点必须在消息工作区由用户显式确认，不得自动执行。`);
       if (driver.caps.sql) sysParts.push(`生成 SQL 时请使用 ${driver.label} 语法。`);
       if (driver.caps.mapping) sysParts.push("当前为 Elasticsearch。不要生成 SQL；使用 ```elasticsearch 代码块，第一行为 GET 或 POST 加相对路径（例如 POST /example-index/_search），下一行放 JSON DSL。仅支持 _search、_count、_mapping、_settings、_cluster/health 和 _cat 只读接口；禁止生成写操作或认证信息。");
     }

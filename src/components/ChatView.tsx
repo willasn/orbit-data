@@ -5,6 +5,7 @@ import { driverOf } from "../db/drivers";
 import DataGrid from "./DataGrid";
 import Chart from "./Chart";
 import KafkaWorkspace from "./KafkaWorkspace";
+import MqttWorkspace from "./MqttWorkspace";
 
 const SUGGESTIONS = [
   { icon: "📝", label: "生成查询 SQL", prompt: "帮我查询当前数据库中所有表的行数,并按行数倒序排列" },
@@ -15,6 +16,7 @@ const SUGGESTIONS = [
 
 export default function MainArea() {
   const { tabs, activeTabId, setActiveTab, closeTab, newChat, clearChat, openChatTab, toggleChatPin, deleteChat, sessions, askConfirm } = useStore();
+  const config = useStore((s) => s.config);
   const [showHistory, setShowHistory] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ sessionId: string; x: number; y: number } | null>(null);
   const activeTab = tabs.find((t) => t.id === activeTabId);
@@ -46,6 +48,10 @@ export default function MainArea() {
     });
     if (ok) deleteChat(session.id);
   };
+  // 切换到专属工作区时收起历史会话侧栏（其入口按钮已隐藏）
+  useEffect(() => {
+    if (activeTab?.kind !== "chat") setShowHistory(false);
+  }, [activeTab?.kind]);
   const openSessionMenu = (e: React.MouseEvent, sessionId: string) => {
     e.preventDefault();
     e.stopPropagation();
@@ -92,15 +98,18 @@ export default function MainArea() {
           ))}
           <button className="tab-action tab-new" title="新建会话" aria-label="新建会话" onClick={newChat}><Plus size={16} /></button>
         </div>
-        <div className="tab-actions">
-          <button className={`tab-action${showHistory ? " active" : ""}`} title="历史会话"
-            aria-label="历史会话" onClick={() => setShowHistory((open) => !open)} aria-expanded={showHistory}>
-            <History size={16} />
-          </button>
-          <button className="tab-action danger" title="清空当前会话" aria-label="清空当前会话"
-            disabled={!activeSession?.messages.length || activeSession.streaming}
-            onClick={() => void confirmClearChat()}><Trash2 size={16} /></button>
-        </div>
+        {/* 专属工作区（MQTT / Kafka 等）不显示会话相关操作 */}
+        {activeTab?.kind === "chat" && (
+          <div className="tab-actions">
+            <button className={`tab-action${showHistory ? " active" : ""}`} title="历史会话"
+              aria-label="历史会话" onClick={() => setShowHistory((open) => !open)} aria-expanded={showHistory}>
+              <History size={16} />
+            </button>
+            <button className="tab-action danger" title="清空当前会话" aria-label="清空当前会话"
+              disabled={!activeSession?.messages.length || activeSession.streaming}
+              onClick={() => void confirmClearChat()}><Trash2 size={16} /></button>
+          </div>
+        )}
       </div>
 
       <div className="chat-workspace">
@@ -127,7 +136,9 @@ export default function MainArea() {
           ) : activeTab?.kind === "result" ? (
             <ResultPanel result={activeTab.result} />
           ) : activeTab?.kind === "messaging" ? (
-            <KafkaWorkspace key={activeTab.id} connId={activeTab.connId} initialTopic={activeTab.topic} />
+            config?.connections.find((c) => c.id === activeTab.connId)?.db_type === "mqtt"
+              ? <MqttWorkspace key={activeTab.id} connId={activeTab.connId} />
+              : <KafkaWorkspace key={activeTab.id} connId={activeTab.connId} initialTopic={activeTab.topic} />
           ) : (
             <div className="empty-hint center">暂无打开的标签页</div>
           )}

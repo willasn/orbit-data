@@ -8,6 +8,25 @@ export interface KafkaConfig {
   client_id: string;
 }
 
+export interface MqttConfig {
+  protocol: "mqtt" | "mqtts" | "ws" | "wss";
+  client_id: string;
+  mqtt_version: "5.0" | "3.1.1";
+  keep_alive_secs: number;
+  clean_start: boolean;
+  session_expiry_secs: number;
+  connection_timeout_secs: number;
+  /** WebSocket 路径（仅 ws / wss） */
+  path: string;
+  ca_file: string;
+  client_cert_file: string;
+  client_key_file: string;
+  will_topic: string;
+  will_payload: string;
+  will_qos: 0 | 1 | 2;
+  will_retain: boolean;
+}
+
 /// 数据库连接配置
 export interface Connection {
   id: string;
@@ -24,6 +43,28 @@ export interface Connection {
   /** 左栏分组名(空串表示未分组) */
   group: string;
   kafka?: KafkaConfig | null;
+  mqtt?: MqttConfig | null;
+}
+
+export interface MqttMessage {
+  seq: number;
+  topic: string;
+  payload: string;
+  payload_hex: string;
+  size: number;
+  qos: number;
+  retain: boolean;
+  /** true = 本机发布，false = 从 Broker 收到 */
+  sent: boolean;
+  ts: number;
+}
+
+export interface MqttPage {
+  messages: MqttMessage[];
+  last_seq: number;
+  reset: boolean;
+  connected: boolean;
+  error: string;
 }
 
 /** 后端记录的已连接会话 */
@@ -214,4 +255,17 @@ export interface DbTree {
   error: string;
   /** error 来自哪一层(只在对应层级显示「加载失败,点击重试」) */
   errorLevel: TreeLoading;
+}
+
+/** 自动更新检查结果；无新版本时 latest / notes / published_at 为 null */
+export interface UpdateInfo {
+  has_update: boolean;
+  /** 当前运行版本 */
+  current: string;
+  /** 远端最新版本 */
+  latest: string | null;
+  /** 更新说明(Release notes) */
+  notes: string | null;
+  /** 发布时间(Unix 秒) */
+  published_at: number | null;
 }

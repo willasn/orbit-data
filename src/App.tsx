@@ -8,6 +8,7 @@ import ConnectionDialog from "./components/ConnectionDialog";
 import CreateObjectDialog from "./components/CreateObjectDialog";
 import AskDialog from "./components/AskDialog";
 import PanelResizer from "./components/PanelResizer";
+import AutoUpdateBanner from "./components/AutoUpdateBanner";
 
 export default function App() {
   const {
@@ -21,6 +22,7 @@ export default function App() {
     toast,
     createTarget,
   } = useStore();
+  const activeTabKind = useStore((s) => s.tabs.find((t) => t.id === s.activeTabId)?.kind);
 
   useEffect(() => {
     init().catch((e) => console.error("初始化失败", e));
@@ -38,7 +40,7 @@ export default function App() {
           {showRight && (
             <PanelResizer side="right" width={rightWidth} onResize={(w) => setPaneWidth("right", w)} />
           )}
-          {showRight && <SqlEditorPanel />}
+          {showRight && <SqlEditorPanel disabled={activeTabKind === "messaging"} />}
         </div>
       ) : (
         <SettingsView />
@@ -46,6 +48,7 @@ export default function App() {
       <ConnectionDialog />
       {createTarget && <CreateObjectDialog key={`${createTarget.connId}:${createTarget.kind}:${createTarget.database ?? ""}`} />}
       <AskDialog />
+      <AutoUpdateBanner />
       {toast && <div className="toast">{toast}</div>}
     </div>
   );

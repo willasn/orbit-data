@@ -15,6 +15,30 @@ pub struct KafkaConfig {
     pub client_id: String,
 }
 
+/// MQTT 连接参数（协议、会话、TLS 与遗嘱消息）
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct MqttConfig {
+    /// mqtt | mqtts | ws | wss
+    pub protocol: String,
+    pub client_id: String,
+    /// 5.0 | 3.1.1
+    pub mqtt_version: String,
+    pub keep_alive_secs: u16,
+    pub clean_start: bool,
+    pub session_expiry_secs: u32,
+    pub connection_timeout_secs: u16,
+    /// WebSocket 路径（仅 ws / wss）
+    pub path: String,
+    pub ca_file: String,
+    pub client_cert_file: String,
+    pub client_key_file: String,
+    pub will_topic: String,
+    pub will_payload: String,
+    pub will_qos: u8,
+    pub will_retain: bool,
+}
+
 /// 数据库连接配置
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Connection {
@@ -40,6 +64,8 @@ pub struct Connection {
     pub group: String,
     #[serde(default)]
     pub kafka: Option<KafkaConfig>,
+    #[serde(default)]
+    pub mqtt: Option<MqttConfig>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]

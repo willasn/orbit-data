@@ -2,6 +2,7 @@ mod ai;
 mod config;
 mod db;
 mod gitsync;
+mod update;
 
 use config::{AppConfig, ConfigStore, Connection, ModelConfig};
 use tauri::ipc::Channel;
@@ -28,6 +29,7 @@ fn get_config(state: tauri::State<ConfigStore>) -> Result<AppConfig, String> {
 fn save_connection(
     state: tauri::State<ConfigStore>,
     sessions: tauri::State<db::session::SessionStore>,
+    mqtt: tauri::State<db::mqtt::MqttManager>,
     conn: Connection,
 ) -> Result<AppConfig, String> {
     let mut cfg = state.read()?;
@@ -37,6 +39,7 @@ fn save_connection(
         cfg.connections.push(c);
     } else if let Some(existing) = cfg.connections.iter_mut().find(|c| c.id == conn.id) {
         sessions.remove(&conn.id);
+        mqtt.disconnect(&conn.id);
         *existing = conn;
     }
     state.write(&cfg)?;
@@ -44,8 +47,14 @@ fn save_connection(
 }
 
 #[tauri::command]
-fn delete_connection(state: tauri::State<ConfigStore>, sessions: tauri::State<db::session::SessionStore>, id: String) -> Result<AppConfig, String> {
+fn delete_connection(
+    state: tauri::State<ConfigStore>,
+    sessions: tauri::State<db::session::SessionStore>,
+    mqtt: tauri::State<db::mqtt::MqttManager>,
+    id: String,
+) -> Result<AppConfig, String> {
     sessions.remove(&id);
+    mqtt.disconnect(&id);
     let mut cfg = state.read()?;
     cfg.connections.retain(|c| c.id != id);
     state.write(&cfg)?;
@@ -101,9 +110,15 @@ async fn test_connection(conn: Connection) -> Result<String, String> {
 #[tauri::command]
 async fn connect_db(
     state: tauri::State<'_, db::session::SessionStore>,
+    mqtt: tauri::State<'_, db::mqtt::MqttManager>,
     conn: Connection,
 ) -> Result<String, String> {
-    let detail = db::test_connection(&conn).await?;
+    // MQTT 需要保持常驻客户端以持续接收消息，不能只做一次握手测试
+    let detail = if conn.db_type == "mqtt" {
+        db::mqtt::connect(&mqtt, &conn).await?
+    } else {
+        db::test_connection(&conn).await?
+    };
     let since_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -121,8 +136,13 @@ async fn connect_db(
 
 /// 断开连接（仅清除会话记录；再次操作会按需重连）
 #[tauri::command]
-fn disconnect_db(state: tauri::State<'_, db::session::SessionStore>, id: String) -> Result<(), String> {
+fn disconnect_db(
+    state: tauri::State<'_, db::session::SessionStore>,
+    mqtt: tauri::State<'_, db::mqtt::MqttManager>,
+    id: String,
+) -> Result<(), String> {
     state.remove(&id);
+    mqtt.disconnect(&id);
     Ok(())
 }
 
@@ -146,6 +166,55 @@ async fn kafka_request(
     if conn.db_type != "kafka" { return Err("该连接不支持 Kafka 操作".into()); }
     if !sessions.snapshot().contains_key(&conn_id) { return Err("连接已断开，请重新连接".into()); }
     db::kafka::request(conn, request).await
+}
+
+#[tauri::command]
+async fn mqtt_subscribe(
+    mqtt: tauri::State<'_, db::mqtt::MqttManager>,
+    conn_id: String,
+    topic: String,
+    qos: u8,
+) -> Result<(), String> {
+    mqtt.subscribe(&conn_id, &topic, qos).await
+}
+
+#[tauri::command]
+async fn mqtt_unsubscribe(
+    mqtt: tauri::State<'_, db::mqtt::MqttManager>,
+    conn_id: String,
+    topic: String,
+) -> Result<(), String> {
+    mqtt.unsubscribe(&conn_id, &topic).await
+}
+
+#[tauri::command]
+async fn mqtt_publish(
+    mqtt: tauri::State<'_, db::mqtt::MqttManager>,
+    conn_id: String,
+    topic: String,
+    qos: u8,
+    retain: bool,
+    payload: String,
+    format: String,
+) -> Result<(), String> {
+    mqtt.publish(&conn_id, &topic, qos, retain, &payload, &format).await
+}
+
+#[tauri::command]
+fn mqtt_messages(
+    mqtt: tauri::State<'_, db::mqtt::MqttManager>,
+    conn_id: String,
+    since: u64,
+) -> Result<db::mqtt::MqttPage, String> {
+    mqtt.page(&conn_id, since)
+}
+
+#[tauri::command]
+fn mqtt_clear(
+    mqtt: tauri::State<'_, db::mqtt::MqttManager>,
+    conn_id: String,
+) -> Result<(), String> {
+    mqtt.clear(&conn_id)
 }
 
 #[tauri::command]
@@ -254,7 +323,13 @@ fn sync_status(state: tauri::State<ConfigStore>) -> Result<String, String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // 依赖图中 ring 与 aws-lc-rs 同时启用，不安装默认 Provider 时
+    // rustls 的 ClientConfig::builder() 会 panic（MQTT 的 wss/mqtts 默认 TLS 配置会触发）
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     tauri::Builder::default()
+        // 自动更新：更新源与公钥见 tauri.conf.json 的 plugins.updater
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let dir = app
                 .path()
@@ -262,6 +337,7 @@ pub fn run() {
                 .unwrap_or_else(|_| std::path::PathBuf::from("."));
             app.manage(ConfigStore::new(dir));
             app.manage(db::session::SessionStore::default());
+            app.manage(db::mqtt::MqttManager::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -276,6 +352,11 @@ pub fn run() {
             disconnect_db,
             connection_status,
             kafka_request,
+            mqtt_subscribe,
+            mqtt_unsubscribe,
+            mqtt_publish,
+            mqtt_messages,
+            mqtt_clear,
             list_databases,
             list_tables,
             list_columns,
@@ -290,6 +371,8 @@ pub fn run() {
             sync_commit,
             sync_pull,
             sync_status,
+            update::update_check,
+            update::update_install,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

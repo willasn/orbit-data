@@ -25,6 +25,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -34,5 +35,13 @@
       "icons/icon.ico",
       "icons/icon.png"
     ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDc1QjQ3MTIyODI3RTQ3ODAKUldTQVIzNkNJbkcwZFRRNkNVOWNiYWxrRld5bjJUYmdJdTBXWTFnVTV5Y1JhRmNwc3YvNzQrL2EK",
+      "endpoints": [
+        "https://github.com/willasn/orbit-data/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

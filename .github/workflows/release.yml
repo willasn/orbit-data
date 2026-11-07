@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            args: '--target aarch64-apple-darwin'
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: ''
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Sync version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "Syncing version -> $VERSION"
+          node -e '
+            const fs = require("fs");
+            const v = process.argv[1];
+            const cargo = fs.readFileSync("src-tauri/Cargo.toml", "utf8");
+            fs.writeFileSync("src-tauri/Cargo.toml", cargo.replace(/^version = ".*"$/m, `version = "${v}"`));
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            pkg.version = v;
+            fs.writeFileSync("package.json", JSON.stringify(pkg, null, 2) + "\n");
+            const conf = JSON.parse(fs.readFileSync("src-tauri/tauri.conf.json", "utf8"));
+            conf.version = v;
+            fs.writeFileSync("src-tauri/tauri.conf.json", JSON.stringify(conf, null, 2) + "\n");
+          ' "$VERSION"
+
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 自动更新签名：私钥（+ 密码）存在仓库 Secrets 里，
+          # 公钥已写入 src-tauri/tauri.conf.json 的 plugins.updater.pubkey。
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'OrbitData ${{ github.ref_name }}'
+          releaseBody: |
+            下载下方对应平台的安装包：
+
+            - macOS (Apple Silicon)：`OrbitData_*.dmg`
+            - Windows：`OrbitData_*.msi` 或 `OrbitData_*-setup.exe`
+
+            已安装旧版本的用户会在启动时收到自动更新提示，也可在设置中手动检查。
+
+            > 安装包未做代码签名，首次打开可能被系统拦截，请按以下方式放行：
+
+            **macOS**：若提示「无法验证开发者」，请右键点击应用 → 选择「打开」，或执行：
+
+            ```
+            xattr -cr /Applications/OrbitData.app
+            ```
+
+            **Windows**：若弹出 SmartScreen 提示，请点「更多信息」→「仍要运行」。
+          releaseDraft: false
+          prerelease: false
+          args: ${{ matrix.args }}

@@ -1,13 +1,13 @@
 # FEATURE.md — 功能清单与开发进度
 
-> 更新日期: 2026-10-09 · 版本: v0.1.4 · 新增 SQL Server 连接器（tiberius / TDS，编译检查通过，真实环境联调待进行）；此前新增 messaging 大类与 Kafka 专项（代码完成，编译检查通过，真实集群验收待进行）与 5 种国产 / 信创数据库登记（含此前已达梦共 6 种；仅注册，无后端连接器）
+> 更新日期: 2026-11-02 · 版本: v0.1.5 · 新增 MQTT 连接与消息工作区（rumqttc 0.25；MQTT 5.0 / 3.1.1 连接、订阅、发布与收发已用测试 Broker 验证）；此前新增 SQL Server 连接器（tiberius / TDS，编译检查通过，真实环境联调待进行）与 messaging 大类 / Kafka 专项、5 种国产 / 信创数据库登记（仅注册，无后端连接器）
 
 图例: [x] 已完成 · [~] 部分完成 · [ ] 规划中
 
 ## 1. 连接管理
 
 - [x] 新建/编辑/删除数据库连接(名称、主机、端口、用户名、密码、默认库、标识颜色)
-- [x] 直接可用:MySQL、PostgreSQL、SQL Server、Redis、Elasticsearch、Kafka 六种类型具备后端连接器与创建入口
+- [x] 直接可用:MySQL、PostgreSQL、SQL Server、Redis、Elasticsearch、Kafka、MQTT 七种类型具备后端连接器与创建入口
 - [~] 国产 / 信创:达梦 DM、人大金仓 Kingbase、南大通用 GBase、神舟通用 Oscar(信创四大)+ PolarDB、openGauss 共 6 种仅完成能力注册表,后端无连接器、创建入口未开放;MySQL / PG 协议族类型可尝试用对应已支持类型连接(未验证),详见 [DATABASES.md](./DATABASES.md) 第 3.11 节
 - [x] Elasticsearch: HTTP/HTTPS（验证证书）、可选 Basic Auth、连接测试、索引直挂连接、嵌套 Mapping 与 multi-fields 浏览
 - [x] Elasticsearch: 只读 REST/JSON DSL 控制台、JSON 格式化、文档预览、Mapping/Settings、文档计数；搜索默认 500 条、上限 1000 条，聚合结果保留 JSON
@@ -110,7 +110,8 @@
 - [x] 前端轻依赖(React + Zustand + lucide-react,无重型 UI 库)
 - [x] 前端产物 gzip 约 60 KB
 - [x] 应用图标正式设计(圆角轨道与数据库主题，适配桌面及移动端)
-- [ ] 自动更新(tauri-plugin-updater)
+- [x] 自动更新(tauri-plugin-updater)：启动时检查 GitHub Releases 的 `latest.json`，发现新版本右下角提示，确认后下载、校验签名、安装并重启
+- [x] 打 tag 自动发布(GitHub Actions `v*`)：构建 macOS / Windows 安装包并上传 Release，同时生成更新所需的签名产物
 - [ ] 多语言(i18n)
 
 ## 8. Kafka 消息工作区（v0.1.2，2026-10-09）
@@ -131,6 +132,19 @@
 - [ ] Schema Registry、Avro / Protobuf 解码、OAuth / Kerberos、ACL 管理、分区重分配、RabbitMQ / RocketMQ / Pulsar 独立驱动
 - [ ] 真实 Kafka 集群联调与安全机制矩阵回归验证
 
+## 9. MQTT 消息工作区（v0.1.5，2026-11-02）
+
+> 已用 MQTT 5.0 与 3.1.1 对测试 Broker 完成「连接 → 订阅 → 发布 → 接收」闭环验证（`cargo test`，凭据仅通过环境变量注入）。
+
+- [x] 新增 MQTT 类型（`messaging` 大类）：协议 `mqtt` / `mqtts` / `ws` / `wss`、Client ID、用户名密码、Keep Alive、连接超时、Clean Start、会话过期间隔（5.0）、WebSocket 路径
+- [x] TLS：自定义 CA、客户端证书与私钥；留空使用系统信任证书。遗嘱消息：Topic / Payload / QoS / Retain
+- [x] 连接测试与常驻会话：连接后后台保持客户端与消息缓冲，断开 / 编辑 / 删除连接时一并释放
+- [x] 订阅管理：批量主题（逗号分隔）、QoS、主题颜色、启用 / 禁用、删除；订阅与发布草稿按连接保存在本地
+- [x] 消息收发：增量轮询（500ms）、发送 / 接收方向标识、QoS / Retain / 时间 / 字节数、JSON 自动美化、Text / JSON / Hex 显示切换、复制 Payload
+- [x] 消息筛选：按订阅主题（支持 `+` / `#` 通配符）、按方向、按主题或内容搜索；清空当前显示；自动滚动开关
+- [x] 发布：Topic（历史订阅下拉）、QoS、Retain、Plaintext / JSON / Base64 / Hex Payload、`Cmd/Ctrl + Enter` 发送
+- [ ] mqtts / wss 自签证书跳过校验、MQTT 5 用户属性与订阅选项（No Local、Retain as Published、Retain Handling）、消息导出、Topic 树 / 仪表盘等视图器功能
+
 ## 已知限制
 
 1. PostgreSQL 列信息暂未读取主键/注释(仅 schema/类型/可空)
@@ -144,3 +158,5 @@
 9. Kafka 消息导出含业务内容，请保存到受控位置；有限时轮询监听并非永久后端订阅，停止后在途读取可完成但不继续发起新轮询
 10. SQL Server 仅支持 SQL Server 身份认证（用户名 / 密码），不支持 Windows 集成认证 / AAD 与命名实例（SQL Browser）；连接加密开启但不校验服务器证书，自签或内网证书可直接连上。不支持客户端 `GO` 分隔符，一次执行多条语句仅展示第一个结果集；TDS 8.0 严格模式与 Azure SQL 未验证
 11. SQL Server 的「新建库 / 新建表」设计窗口仍限 MySQL / PG（方言未适配），其余只读浏览、查询与 SQL 执行可用
+12. MQTT 消息保存在后端内存缓冲（每连接 2000 条），关闭应用或断开连接后不保留；订阅列表与发布草稿按连接存于本地 localStorage，不随 Git 同步
+13. MQTT 配置含明文用户名 / 密码；证书只记录路径，不随 Git 同步，跨设备需单独部署证书。ws / wss 依赖 Broker 的 WebSocket 监听与 `/mqtt` 路径配置

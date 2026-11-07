@@ -41,15 +41,26 @@ alwaysApply: true
 应用会把**数据库连接信息（主机、端口、用户名、密码）**与 **AI 模型 API Key、接口地址**持久化到本机
 `app_config_dir/config.json`，并可通过 Git 同步导出为 `orbit-data-sync.json`。因此：
 
-1. 严禁在源码、注释、测试、示例、文档、日志中硬编码任何个人账号信息或配置信息，包括但不限于：
+1. **严禁把敏感数据写入任何可能被 git 提交的内容**。判定标准：只要文件位于仓库工作区且不在 `.gitignore` 中，就视为「可能被提交」，一律不得出现真实敏感值。覆盖范围包括但不限于：
+   - 源码、注释、单元测试 / 集成测试、测试 fixture 与种子数据、Mock 数据
+   - 示例、demo、脚本、CI 配置、构建配置
+   - 文档（README / FEATURE / CONTEXT_MENU / 变更说明）、提交信息与 PR 描述
+   - 日志、错误报告、调试 dump、崩溃堆栈、查询结果快照、导出文件（`.csv` / `.json` / `.sql`）、截图与录屏
+   - 由 AI 会话、自动修复、代码生成产出的任何文件同样适用此约束
+2. 严禁硬编码的个人账号信息与配置信息包括但不限于：
    - 数据库主机 / 端口 / 用户名 / 密码 / 连接串
    - AI 接口地址（Base URL）、API Key、模型私有 ID
    - Git 同步仓库本地路径、远程 URL（含 token 的 `https://user:token@host/...`）、分支名等个人偏好
-   - 本机绝对路径（如 `/Users/<name>/...`）
-2. 这些值只允许来自：应用配置目录的 `config.json`、用户运行时输入、环境变量或配置读取接口（`src-tauri/src/config.rs`）。
-3. 文档与示例中一律使用占位符，例如：`your-api-key`、`https://api.example.com/v1`、`127.0.0.1:3306`、`your-user`、`your-password`。
-4. AI 上下文注入（`ai.rs` 中注入连接类型/地址/库名）与日志输出必须脱敏：**禁止**带出密码、API Key、完整连接串。
-5. `config.json`、`orbit-data-sync.json`、`.env*` 等含真实配置的文件必须写入 `.gitignore`，绝不随 git 提交
-   （当前 `.gitignore` 仅含 `node_modules`、`dist`、`src-tauri/target`、`*.log`、`.DS_Store`，新增配置文件后需同步追加）。
-6. 提交前必须确认 `git status` 中不含上述文件；发现误加立即移出并撤销暂存。
-7. Git 同步功能导出的是明文敏感数据，文档与 UI 提示中必须保留「请使用私有仓库」的警告。
+   - 本机绝对路径（如 `/Users/<name>/...`）、个人邮箱、个人仓库地址
+3. 这些值只允许来自：应用配置目录的 `config.json`、用户运行时输入、环境变量或配置读取接口（`src-tauri/src/config.rs`）。不得为了「方便调试」在代码中填入真实值兜底。
+4. 运行时 / 调试产生的敏感数据**只写**应用配置目录或系统临时目录，禁止落到仓库目录；确需在工作区留档（如调试日志、导出样本），必须先加入 `.gitignore` 再生成，且文件中不得含真实凭据。
+5. 文档与示例中一律使用占位符，例如：`your-api-key`、`https://api.example.com/v1`、`127.0.0.1:3306`、`your-user`、`your-password`。
+6. AI 上下文注入（`ai.rs` 中注入连接类型/地址/库名）与日志输出必须脱敏：**禁止**带出密码、API Key、完整连接串；日志中的主机 / 库名也应做必要遮蔽。
+7. `config.json`、`orbit-data-sync.json`、`.env*` 等含真实配置的文件必须写入 `.gitignore`，绝不随 git 提交
+   （当前 `.gitignore` 已含 `node_modules`、`dist`、`src-tauri/target`、`*.log`、`.DS_Store`、`config.json`、`orbit-data-sync.json`、`.env*`；新增含敏感数据的文件类型后需同步追加）。
+8. 提交前必须自检，三项都要通过：
+   - `git status --short` 中不含上述文件；
+   - 已跟踪文件无敏感命中，例如：
+     `git grep -nIE "(sk-[A-Za-z0-9]{8,}|ghp_|github_pat_|AKIA[0-9A-Z]{16}|https?://[^/\"' )]*@|/Users/)" -- . ':!package-lock.json' ':!src-tauri/Cargo.lock'`
+   - 真实凭据只出现在被忽略的文件中。发现误加立即移出并撤销暂存；若已推送，必须轮换该凭据，不能只删文件。
+9. Git 同步功能导出的是明文敏感数据，文档与 UI 提示中必须保留「请使用私有仓库」的警告。

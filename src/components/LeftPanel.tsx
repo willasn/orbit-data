@@ -43,6 +43,7 @@ export default function LeftPanel() {
     selectDatabase,
     selectTable,
     openDialog,
+    openMessaging,
   } = useStore();
 
   // 同组聚拢(组内保持配置顺序,未分组排最后)
@@ -142,6 +143,7 @@ export default function LeftPanel() {
                     c.group ? " in-group" : ""
                   }`}
                   onClick={() => toggleConnection(c.id)}
+                  onDoubleClick={driver.caps.messaging ? () => void openMessaging(c.id) : undefined}
                   onContextMenu={(e) =>
                     openMenu(e, { kind: "connection", conn: c, driver })
                   }
@@ -160,7 +162,13 @@ export default function LeftPanel() {
                         {driver.label}
                       </span>
                     </div>
-                    <div className="conn-host">{driver.caps.messaging ? (c.kafka?.bootstrap_servers ?? []).join(", ") : `${c.host}:${c.port}`}</div>
+                    <div className="conn-host">
+                      {c.db_type === "mqtt"
+                        ? `${c.host}:${c.port}`
+                        : driver.caps.messaging
+                          ? (c.kafka?.bootstrap_servers ?? []).join(", ")
+                          : `${c.host}:${c.port}`}
+                    </div>
                   </div>
                   <button
                     type="button"
@@ -193,7 +201,9 @@ export default function LeftPanel() {
                       </div>
                     )}
                     {loading !== "databases" && tree?.errorLevel !== "databases" && dbs.length === 0 && (
-                      <div className="tree-row indent1 tree-loading">无数据库</div>
+                      <div className="tree-row indent1 tree-loading">
+                        {driver.caps.messaging ? "双击连接打开消息工作区" : "无数据库"}
+                      </div>
                     )}
 
                     {dbs.slice(0, dbLimit).map((db) => {
@@ -251,7 +261,14 @@ export default function LeftPanel() {
                                 </div>
                               )}
                               {!loadingTables && !dbError && tables.length === 0 && (
-                                <div className="tree-row indent2 tree-loading">无对象</div>
+                                driver.caps.messaging ? (
+                                  <div className={`tree-row indent${driver.caps.databases ? 2 : 1} tree-more`} onClick={() => void openMessaging(c.id)}>
+                                    <Radio size={12} />
+                                    <span>打开消息工作区</span>
+                                  </div>
+                                ) : (
+                                  <div className="tree-row indent2 tree-loading">无对象</div>
+                                )
                               )}
 
                               {tables.slice(0, tLimit).map((t) => {

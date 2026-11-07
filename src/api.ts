@@ -6,10 +6,12 @@ import type {
   Connection,
   KafkaRequest,
   ModelConfig,
+  MqttPage,
   QueryResult,
   RedisKeyView,
   SessionInfo,
   TableInfo,
+  UpdateInfo,
 } from "./types";
 
 export interface ChatEvent {
@@ -35,6 +37,21 @@ export const api = {
   connectionStatus: () => invoke<Record<string, SessionInfo>>("connection_status"),
   kafkaRequest: <T = unknown>(connId: string, request: KafkaRequest) =>
     invoke<T>("kafka_request", { connId, request }),
+  mqttSubscribe: (connId: string, topic: string, qos: number) =>
+    invoke<void>("mqtt_subscribe", { connId, topic, qos }),
+  mqttUnsubscribe: (connId: string, topic: string) =>
+    invoke<void>("mqtt_unsubscribe", { connId, topic }),
+  mqttPublish: (
+    connId: string,
+    topic: string,
+    qos: number,
+    retain: boolean,
+    payload: string,
+    format: string,
+  ) => invoke<void>("mqtt_publish", { connId, topic, qos, retain, payload, format }),
+  mqttMessages: (connId: string, since: number) =>
+    invoke<MqttPage>("mqtt_messages", { connId, since }),
+  mqttClear: (connId: string) => invoke<void>("mqtt_clear", { connId }),
   listDatabases: (conn: Connection) => invoke<string[]>("list_databases", { conn }),
   listTables: (conn: Connection, database: string) =>
     invoke<TableInfo[]>("list_tables", { conn, database }),
@@ -66,4 +83,9 @@ export const api = {
   syncCommit: (message: string) => invoke<string>("sync_commit", { message }),
   syncPull: () => invoke<AppConfig>("sync_pull"),
   syncStatus: () => invoke<string>("sync_status"),
+
+  /** 检查是否有新版本(只查询,不下载) */
+  updateCheck: () => invoke<UpdateInfo>("update_check"),
+  /** 下载并安装更新,完成后应用自动重启 */
+  updateInstall: () => invoke<void>("update_install"),
 };

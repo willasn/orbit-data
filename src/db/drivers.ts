@@ -135,6 +135,7 @@ const SQL: Caps = {
 
 const DRIVER_LIST: DriverMeta[] = [
   { type: "kafka", label: "Kafka", kind: "messaging", defaultPort: 9092, color: "#a78bfa", dbLabel: "集群", tableLabel: "Topic", quote: "", caps: { ...BASE, tables: true, write: true, partition: true, stats: true, export: true, messaging: true, browseMessages: true, produceMessages: true, topicManagement: true, consumerGroups: true, resetOffsets: true } },
+  { type: "mqtt", label: "MQTT", kind: "messaging", defaultPort: 1883, color: "#ff8c42", dbLabel: "Broker", tableLabel: "主题", quote: "", caps: { ...BASE, messaging: true, produceMessages: true } },
   // ── sql：关系型 ──────────────────────────────────────────────
   { type: "mysql", label: "MySQL", kind: "sql", defaultPort: 3306, color: "#22c55e", dbLabel: "数据库", tableLabel: "表", quote: "`", createDialect: "mysql", caps: SQL },
   { type: "mariadb", label: "MariaDB", kind: "sql", defaultPort: 3306, color: "#16a34a", dbLabel: "数据库", tableLabel: "表", quote: "`", caps: SQL },
