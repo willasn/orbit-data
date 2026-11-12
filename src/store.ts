@@ -1,13 +1,17 @@
 import { create } from "zustand";
-import { api, type ChatEvent } from "./api";
+import { api } from "./api";
 import { driverOf } from "./db/drivers";
+import { resolveEditSource } from "./db/resultEdit";
 import type {
+  AgentStep,
   AppConfig,
+  CellValue,
   ChatMessage,
   ChatSession,
   Connection,
   DbTree,
   QueryResult,
+  RowUpdate,
   SessionInfo,
   Tab,
 } from "./types";
@@ -18,10 +22,31 @@ const pendingConnects = new Map<string, Promise<void>>();
 let idSeq = 0;
 const nextId = (prefix: string) => `${prefix}-${Date.now().toString(36)}-${idSeq++}`;
 
-/** 当前正在进行(未被中断)的 AI 请求 ID；用于丢弃已停止请求的后续事件 */
-let activeRequestId: string | null = null;
-/** 当前请求所属会话(切换标签后仍能中断正确的会话) */
-let activeRequestSession: string | null = null;
+/** 单轮 Agent 最多自动执行的步数；只是安全网，正常靠模型返回 done 收尾 */
+const MAX_AGENT_STEPS = 40;
+/** 同一条命令连续出现几次判定为原地打转 */
+const REPEAT_LIMIT = 3;
+/** 连续失败几条命令后暂停，交回用户判断环境 */
+const FAIL_STREAK_LIMIT = 3;
+
+/** 每个会话的 Agent 循环状态（循环在前端跑，后端只做决策） */
+interface AgentRun {
+  goal: string;
+  modelId: string;
+  conn: Connection | null;
+  database: string;
+  context: string;
+  /** 本轮消息在会话中的起始下标：只回填这一轮产生的步骤 */
+  startIndex: number;
+  steps: number;
+  lastCommand: string;
+  repeat: number;
+  failStreak: number;
+  stopped: boolean;
+  busy: boolean;
+}
+
+const agentRuns = new Map<string, AgentRun>();
 
 const PANE_KEY = "orbit-data.pane-widths";
 const DEFAULT_PANES = { leftWidth: 264, rightWidth: 372 };
@@ -38,7 +63,18 @@ function loadChats(): ChatSession[] {
       s.messages.every((m: unknown) => m !== null && typeof m === "object" &&
         "role" in m && (m.role === "user" || m.role === "assistant") &&
         "content" in m && typeof m.content === "string")
-    ).map((s) => ({ ...s, title: s.messages.find((m) => m.role === "user")?.content ?? s.title, streaming: false }));
+    ).map((s) => ({
+      ...s,
+      title: s.messages.find((m) => m.role === "user")?.content ?? s.title,
+      streaming: false,
+      messages: s.messages.map((m) => ({
+        ...m,
+        // 未完成的步骤在重新打开时视为已中断，避免显示无法点击的确认按钮
+        status: m.status === "thinking" || m.status === "running" || m.status === "pending"
+          ? "stopped" : m.status,
+        result: undefined,
+      })),
+    }));
   } catch {
     return [];
   }
@@ -48,11 +84,76 @@ function saveChats(sessions: ChatSession[]) {
   try {
     localStorage.setItem(CHAT_KEY, JSON.stringify(sessions.map((s) => ({
       id: s.id, title: s.title, modelId: s.modelId, pinned: s.pinned,
-      messages: s.messages.filter((m) => (m.role === "user" || m.role === "assistant") && m.content),
+      messages: s.messages
+        .filter((m) => (m.role === "user" || m.role === "assistant") && (m.content || m.command))
+        .map((m) => ({
+          role: m.role, content: m.content, stopped: m.stopped,
+          command: m.command, commandKind: m.commandKind,
+          status: m.status, authReason: m.authReason, danger: m.danger,
+          // 输出只保留摘要，避免结果集把本地存储撑爆
+          output: m.output ? m.output.slice(0, 4000) : undefined,
+          outputMeta: m.outputMeta, canContinue: m.canContinue,
+        })),
     }))));
   } catch {
     // 本地存储不可用或空间不足时，当前会话仍可继续使用。
   }
+}
+
+/** 结果单元格转文本（用于回填给模型） */
+function cellText(value: CellValue): string {
+  return value === null ? "NULL" : String(value);
+}
+
+/** 查询结果转成紧凑文本，作为下一步决策的依据 */
+function formatQueryOutput(result: QueryResult, maxRows = 20): string {
+  const rows = result.rows.slice(0, maxRows);
+  const lines = [
+    `返回 ${result.row_count} 行，耗时 ${result.duration_ms} ms`,
+    result.columns.join(" | "),
+  ];
+  rows.forEach((row, index) => {
+    lines.push(`${index + 1}. ${row.map(cellText).join(" | ")}`);
+  });
+  if (result.row_count > rows.length) lines.push(`…仅展示前 ${rows.length} 行`);
+  return lines.join("\n");
+}
+
+/** 拆 Redis 命令参数，保留引号内的空格 */
+function splitRedisCommand(command: string): string[] {
+  const tokens = command.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+  return tokens.map((token) => token.replace(/^["']|["']$/g, ""));
+}
+
+function buildAgentContext(
+  conn: Connection | null,
+  driver: ReturnType<typeof driverOf> | null,
+  tree: DbTree | undefined,
+  database: string,
+): string {
+  if (!conn || !driver) {
+    return "当前未选择数据库连接。只能回答一般性问题；如果用户的目标需要查询数据，请提示其先在左侧选择连接。";
+  }
+  const parts = [`连接：${conn.name}（${driver.label}，${conn.host}:${conn.port}）`];
+  if (driver.caps.databases && database) parts.push(`当前${driver.dbLabel}：${database}`);
+  if (tree?.selectedTable) parts.push(`当前${driver.tableLabel}：${tree.selectedTable}`);
+  if (tree?.selectedColumn) parts.push(`当前字段：${tree.selectedColumn}`);
+  if (conn.db_type === "redis") parts.push("命令类型：单条 Redis 命令");
+  else if (driver.caps.mapping) parts.push("命令类型：Elasticsearch 请求");
+  else parts.push("命令类型：SQL");
+  parts.push("只读查询会直接执行；写入、修改、删除等操作会先请用户确认。");
+  return parts.join("\n");
+}
+
+/** 收集本轮已执行的步骤，回填给模型 */
+function collectAgentSteps(messages: ChatMessage[], startIndex: number): AgentStep[] {
+  return messages
+    .slice(startIndex)
+    .filter((m) => m.command)
+    .map((m) => ({
+      command: m.command as string,
+      output: m.output || (m.status === "skipped" ? "（用户拒绝执行该命令）" : "（尚未执行）"),
+    }));
 }
 
 /** 左栏分组折叠状态(本地记忆,与连接配置解耦) */
@@ -158,6 +259,10 @@ interface Store {
   selectChatModel: (sessionId: string, modelId: string) => void;
 
   runSql: (sql: string) => Promise<void>;
+  /** 提交结果集单元格修改（按主键生成 UPDATE），成功返回 true */
+  commitResultEdits: (tabId: string, rows: RowUpdate[]) => Promise<boolean>;
+  /** 提交后按原 SQL 重新取数刷新结果标签页 */
+  refreshResultTab: (tabId: string) => Promise<void>;
   /** Redis 键内容预览：按值类型取数并以表格展示(string / hash / list / set / zset / stream) */
   inspectKey: (key: string) => Promise<void>;
 
@@ -166,12 +271,22 @@ interface Store {
   toggleChatPin: (sessionId: string) => void;
   deleteChat: (sessionId: string) => void;
   openMessaging: (connId: string, topic?: string) => Promise<void>;
+  /** 打开对象存储工作区（同一连接复用同一个标签页） */
+  openStorage: (connId: string, bucket?: string) => Promise<void>;
   openChatTab: (sessionId: string) => void;
   closeTab: (tabId: string) => void;
   setActiveTab: (tabId: string) => void;
   sendChat: (text: string) => Promise<void>;
   /** 中断当前正在生成的回答(已生成内容保留) */
   stopChat: () => void;
+  /** Agent 待确认步骤：授权并继续执行 */
+  approveAgentStep: (sessionId: string, index: number) => Promise<void>;
+  /** Agent 待确认步骤：跳过该命令并让模型换一条 */
+  skipAgentStep: (sessionId: string, index: number) => void;
+  /** 达到步数上限后继续执行 */
+  resumeAgent: (sessionId: string) => void;
+  /** 把查询结果打开到结果标签页 */
+  openResult: (result: QueryResult, title?: string) => void;
 
   toastTimer: ReturnType<typeof setTimeout> | null;
 }
@@ -203,6 +318,250 @@ function patchTree(set: SetFn, get: GetFn, connId: string, patch: Partial<DbTree
 function activeConn(config: AppConfig | null, connId: string): Connection | null {
   if (!config) return null;
   return config.connections.find((c) => c.id === connId) ?? null;
+}
+
+/**
+ * 结果集可编辑性判定：单表查询 + 主键都在结果中才打上 edit 标记，
+ * 判定失败时保持只读，不打断查询结果的展示。
+ */
+async function hydrateResultEdit(
+  set: SetFn,
+  get: GetFn,
+  tabId: string,
+  conn: Connection,
+  database: string,
+  sql: string,
+  result: QueryResult,
+) {
+  if (!driverOf(conn.db_type).caps.editRows) return;
+  try {
+    const edit = await resolveEditSource(conn, database, sql, result);
+    if (!edit) return;
+    if (!get().tabs.some((t) => t.id === tabId && t.kind === "result")) return;
+    set({
+      tabs: get().tabs.map((t) => (t.id === tabId && t.kind === "result" ? { ...t, edit } : t)),
+    });
+  } catch {
+    /* 元数据不可用时保持只读 */
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Agent 循环（前端驱动：后端只决策，执行与确认都在这里）
+// ---------------------------------------------------------------------------
+
+function patchSession(sessionId: string, updater: (session: ChatSession) => ChatSession): void {
+  useStore.setState((state) => ({
+    sessions: state.sessions.map((session) => (session.id === sessionId ? updater(session) : session)),
+  }));
+}
+
+function patchMessage(sessionId: string, index: number, patch: Partial<ChatMessage>): void {
+  patchSession(sessionId, (session) => ({
+    ...session,
+    messages: session.messages.map((message, i) => (i === index ? { ...message, ...patch } : message)),
+  }));
+}
+
+function persistSessions(): void {
+  saveChats(useStore.getState().sessions);
+}
+
+function setSessionStreaming(sessionId: string, streaming: boolean): void {
+  patchSession(sessionId, (session) => ({ ...session, streaming }));
+  persistSessions();
+}
+
+/** 保证消息流末尾有一个「思考中」占位气泡，返回它的下标 */
+function ensureThinkingMessage(sessionId: string): number {
+  const session = useStore.getState().sessions.find((s) => s.id === sessionId);
+  if (!session) return -1;
+  const lastIndex = session.messages.length - 1;
+  const last = session.messages[lastIndex];
+  if (last && last.role === "assistant" && !last.command && last.status === "thinking") return lastIndex;
+  const nextIndex = session.messages.length;
+  patchSession(sessionId, (s) => ({
+    ...s,
+    messages: [...s.messages, { role: "assistant", content: "", status: "thinking" }],
+  }));
+  return nextIndex;
+}
+
+/** 暂停本轮循环：把原因写回气泡，步数上限类暂停保留「继续执行」 */
+function stopAgentRun(sessionId: string, index: number, note: string, canContinue: boolean): void {
+  patchMessage(sessionId, index, { status: "stopped", content: note, canContinue });
+  const run = agentRuns.get(sessionId);
+  if (run) run.busy = false;
+  if (!canContinue) agentRuns.delete(sessionId);
+  setSessionStreaming(sessionId, false);
+}
+
+/** 在当前连接上执行一条 Agent 命令，并把结果写回气泡 */
+async function executeAgentCommand(sessionId: string, index: number, run: AgentRun): Promise<boolean> {
+  const message = useStore.getState().sessions.find((s) => s.id === sessionId)?.messages[index];
+  const command = message?.command;
+  if (!command) return false;
+  patchMessage(sessionId, index, { status: "running" });
+
+  if (!run.conn) {
+    run.failStreak += 1;
+    patchMessage(sessionId, index, {
+      status: "error",
+      output: "尚未选择数据库连接，无法执行命令。请先在左侧选择连接。",
+    });
+    persistSessions();
+    if (run.failStreak >= FAIL_STREAK_LIMIT) {
+      stopAgentRun(sessionId, index, "当前没有可用连接，已暂停。请选择连接后重新提问。", false);
+      return false;
+    }
+    return true;
+  }
+
+  try {
+    if (run.conn.db_type === "redis") {
+      const text = await api.redisCommand(run.conn, splitRedisCommand(command));
+      const output = (text || "").trim() || "（空结果）";
+      patchMessage(sessionId, index, {
+        status: "done",
+        output: output.length > 8000 ? `${output.slice(0, 8000)}…` : output,
+      });
+    } else {
+      const result = await api.runQuery(run.conn, run.database, command);
+      patchMessage(sessionId, index, {
+        status: "done",
+        result,
+        output: result.row_count === 0 ? "执行成功，但没有返回数据。" : formatQueryOutput(result),
+        outputMeta: `${result.row_count} 行 · ${result.duration_ms} ms`,
+      });
+    }
+    run.failStreak = 0;
+  } catch (e) {
+    run.failStreak += 1;
+    patchMessage(sessionId, index, { status: "error", output: `执行失败：${e}` });
+  }
+  // 执行期间用户可能已停止：不要把结果写回已标记停止的气泡
+  if (run.stopped || !agentRuns.has(sessionId)) return false;
+  persistSessions();
+
+  if (run.failStreak >= FAIL_STREAK_LIMIT) {
+    stopAgentRun(
+      sessionId,
+      index,
+      `连续 ${run.failStreak} 条命令执行失败，已暂停。请检查连接或补充信息后重新提问。`,
+      false,
+    );
+    return false;
+  }
+  return true;
+}
+
+/** 请求模型决策下一步：只读命令自动执行，写操作停下等待确认 */
+async function driveAgentStep(sessionId: string): Promise<void> {
+  const run = agentRuns.get(sessionId);
+  if (!run || run.stopped || run.busy) return;
+  const session = useStore.getState().sessions.find((s) => s.id === sessionId);
+  if (!session) {
+    agentRuns.delete(sessionId);
+    return;
+  }
+  run.busy = true;
+  const index = ensureThinkingMessage(sessionId);
+
+  let result;
+  try {
+    result = await api.aiAgentStep(run.modelId, {
+      goal: run.goal,
+      steps: collectAgentSteps(useStore.getState().sessions
+        .find((s) => s.id === sessionId)?.messages ?? [], run.startIndex),
+      context: run.context,
+      db_type: run.conn?.db_type ?? "",
+      remaining_steps: Math.max(0, MAX_AGENT_STEPS - run.steps),
+    });
+  } catch (e) {
+    run.busy = false;
+    agentRuns.delete(sessionId);
+    patchMessage(sessionId, index, {
+      status: "error",
+      content: `调用模型失败：${e}`,
+      command: undefined,
+    });
+    setSessionStreaming(sessionId, false);
+    return;
+  }
+
+  // 请求期间用户可能已停止或关闭了会话
+  if (run.stopped || !agentRuns.has(sessionId)) {
+    run.busy = false;
+    return;
+  }
+
+  if (result.action === "done") {
+    run.busy = false;
+    agentRuns.delete(sessionId);
+    patchMessage(sessionId, index, {
+      content: result.summary || "任务完成。",
+      status: undefined,
+      canContinue: false,
+    });
+    setSessionStreaming(sessionId, false);
+    return;
+  }
+
+  const command = (result.command ?? "").trim();
+  if (!command) {
+    run.busy = false;
+    agentRuns.delete(sessionId);
+    patchMessage(sessionId, index, { status: "error", content: "AI 未给出可执行命令，请补充说明后重试。" });
+    setSessionStreaming(sessionId, false);
+    return;
+  }
+
+  const kind: ChatMessage["commandKind"] = run.conn?.db_type === "redis"
+    ? "redis"
+    : run.conn && driverOf(run.conn.db_type).caps.mapping ? "elasticsearch" : "sql";
+
+  run.steps += 1;
+  if (command === run.lastCommand) run.repeat += 1;
+  else {
+    run.lastCommand = command;
+    run.repeat = 1;
+  }
+
+  // 先做护栏判断：被拦下的命令不写入消息，避免被当成已执行的步骤
+  if (run.steps > MAX_AGENT_STEPS) {
+    stopAgentRun(
+      sessionId,
+      index,
+      `已达到本轮 ${MAX_AGENT_STEPS} 步上限，这条命令未执行。可以点「继续执行」再给一轮步数。`,
+      true,
+    );
+    return;
+  }
+  if (run.repeat >= REPEAT_LIMIT) {
+    stopAgentRun(sessionId, index, "同一条命令连续出现多次，已暂停以免原地打转。", false);
+    return;
+  }
+
+  patchMessage(sessionId, index, {
+    content: result.thought || "",
+    command,
+    commandKind: kind,
+    status: result.requires_auth ? "pending" : "running",
+    authReason: result.auth_reason || "",
+    danger: result.danger,
+    canContinue: false,
+  });
+
+  // 写 / 改 / 删除等需要用户确认：停下，等待气泡上的「执行 / 跳过」
+  if (result.requires_auth) {
+    run.busy = false;
+    setSessionStreaming(sessionId, false);
+    return;
+  }
+
+  await executeAgentCommand(sessionId, index, run);
+  run.busy = false;
+  if (!run.stopped && agentRuns.has(sessionId)) void driveAgentStep(sessionId);
 }
 
 export const useStore = create<Store>((set, get) => ({
@@ -300,9 +659,11 @@ export const useStore = create<Store>((set, get) => ({
   saveConnection: async (conn) => {
     try {
       const config = await api.saveConnection(conn);
-      if (conn.id && (driverOf(conn.db_type).caps.messaging ||
-        driverOf(activeConn(get().config, conn.id)?.db_type ?? "").caps.messaging)) {
-        get().tabs.filter((t) => t.kind === "messaging" && t.connId === conn.id).forEach((t) => get().closeTab(t.id));
+      const prevType = activeConn(get().config, conn.id)?.db_type ?? "";
+      const needsReset = (t: string) => driverOf(t).caps.messaging || driverOf(t).caps.storage;
+      if (conn.id && (needsReset(conn.db_type) || needsReset(prevType))) {
+        get().tabs.filter((t) => t.kind !== "chat" && t.kind !== "result" && t.connId === conn.id)
+          .forEach((t) => get().closeTab(t.id));
         await get().disconnectDb(conn.id);
       }
       set({ config, dialogOpen: false });
@@ -316,7 +677,8 @@ export const useStore = create<Store>((set, get) => ({
     try {
       const config = await api.deleteConnection(id);
       connectionEpochs.set(id, (connectionEpochs.get(id) ?? 0) + 1);
-      get().tabs.filter((t) => t.kind === "messaging" && t.connId === id).forEach((t) => get().closeTab(t.id));
+      get().tabs.filter((t) => t.kind !== "chat" && t.kind !== "result" && t.connId === id)
+        .forEach((t) => get().closeTab(t.id));
       const dbTree = { ...get().dbTree };
       delete dbTree[id];
       const connSessions = { ...get().connSessions };
@@ -376,7 +738,8 @@ export const useStore = create<Store>((set, get) => ({
     // 等待进行中的握手结束，避免断开后又被握手结果重新建连
     const pending = pendingConnects.get(id);
     if (pending) await pending.catch(() => undefined);
-    get().tabs.filter((t) => t.kind === "messaging" && t.connId === id).forEach((t) => get().closeTab(t.id));
+    get().tabs.filter((t) => t.kind !== "chat" && t.kind !== "result" && t.connId === id)
+      .forEach((t) => get().closeTab(t.id));
     const connSessions = { ...get().connSessions };
     delete connSessions[id];
     const tree = get().dbTree[id];
@@ -582,6 +945,11 @@ export const useStore = create<Store>((set, get) => ({
       await get().openMessaging(conn.id, dbTree[conn.id]?.selectedTable || undefined);
       return;
     }
+    if (driverOf(conn.db_type).caps.storage) {
+      get().showToast("对象存储请使用 OSS 工作区；不执行 SQL 或 AI 生成的命令");
+      await get().openStorage(conn.id, dbTree[conn.id]?.selectedDb || undefined);
+      return;
+    }
     // 断开状态下执行:先自动重连(失败时 connectDb 已提示)
     if (!get().connSessions[conn.id]) await get().connectDb(conn.id);
     if (!get().connSessions[conn.id]) return;
@@ -594,19 +962,67 @@ export const useStore = create<Store>((set, get) => ({
         conn.db_type === "redis"
           ? redisTextResult(await api.redisCommand(conn, sql.trim().split(/\s+/)))
           : await api.runQuery(conn, database, sql);
-      const tabId = nextId("result");
+      // 复用已存在的「查询结果」标签页，避免每次执行都堆一个新标签
+      const existing = get().tabs.find((t) => t.kind === "result" && t.title === "查询结果");
+      const tabId = existing?.id ?? nextId("result");
+      const nextTab = { id: tabId, kind: "result" as const, title: "查询结果", result };
       set({
-        tabs: [
-          ...get().tabs,
-          { id: tabId, kind: "result", title: "查询结果", result },
-        ],
+        tabs: existing
+          ? get().tabs.map((t) => (t.id === tabId ? nextTab : t))
+          : [...get().tabs, nextTab],
         activeTabId: tabId,
         resultView: "table",
         // 结果标签页在中栏展示：确保中栏处于查询视图，避免"执行了却看不到结果"
         view: "chat",
       });
+      if (conn.db_type !== "redis") {
+        void hydrateResultEdit(set, get, tabId, conn, database, sql, result);
+      }
     } catch (e) {
       get().showToast(`执行失败: ${e}`);
+    }
+  },
+
+  commitResultEdits: async (tabId, rows) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    const source = tab?.kind === "result" ? tab.edit : undefined;
+    if (!source) return false;
+    const conn = activeConn(get().config, source.connId);
+    if (!conn) {
+      get().showToast("连接已不存在，无法提交修改");
+      return false;
+    }
+    try {
+      const affected = await api.updateRows(conn, source.database, source.table, rows);
+      get().showToast(
+        affected === 0
+          ? "提交完成，但没有匹配到行（数据可能已被他人修改，已刷新结果）"
+          : `已提交 ${affected} 行修改`,
+      );
+      await get().refreshResultTab(tabId);
+      return true;
+    } catch (e) {
+      get().showToast(`提交失败: ${e}`);
+      return false;
+    }
+  },
+
+  refreshResultTab: async (tabId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    const source = tab?.kind === "result" ? tab.edit : undefined;
+    if (!source) return;
+    const conn = activeConn(get().config, source.connId);
+    if (!conn) return;
+    try {
+      const result = await api.runQuery(conn, source.database, source.sql);
+      set({
+        tabs: get().tabs.map((t) =>
+          t.id === tabId && t.kind === "result" ? { ...t, result } : t,
+        ),
+      });
+      void hydrateResultEdit(set, get, tabId, conn, source.database, source.sql, result);
+    } catch (e) {
+      get().showToast(`刷新结果失败: ${e}`);
     }
   },
 
@@ -666,6 +1082,11 @@ export const useStore = create<Store>((set, get) => ({
   clearChat: (sessionId) => {
     const session = get().sessions.find((s) => s.id === sessionId);
     if (!session || session.streaming) return;
+    const run = agentRuns.get(sessionId);
+    if (run) {
+      run.stopped = true;
+      agentRuns.delete(sessionId);
+    }
     const sessions = get().sessions.map((s) => s.id === sessionId
       ? { ...s, title: "新对话", messages: [] } : s);
     set({ sessions, tabs: get().tabs.map((t) => t.kind === "chat" && t.sessionId === sessionId
@@ -683,6 +1104,11 @@ export const useStore = create<Store>((set, get) => ({
   deleteChat: (sessionId) => {
     const session = get().sessions.find((s) => s.id === sessionId);
     if (!session || session.streaming) return;
+    const run = agentRuns.get(sessionId);
+    if (run) {
+      run.stopped = true;
+      agentRuns.delete(sessionId);
+    }
     const sessions = get().sessions.filter((s) => s.id !== sessionId);
     const tabs = get().tabs.filter((t) => t.kind !== "chat" || t.sessionId !== sessionId);
     const activeTabId = tabs.some((t) => t.id === get().activeTabId)
@@ -702,6 +1128,25 @@ export const useStore = create<Store>((set, get) => ({
     const label = driverOf(conn.db_type).label;
     set({ tabs: existing ? get().tabs : [...get().tabs, { id, kind: "messaging", connId, topic,
       title: topic ? `${label} · ${topic}` : `${label} · ${conn.name}` }], activeTabId: id, activeConnId: connId, view: "chat" });
+  },
+
+  openStorage: async (connId, bucket) => {
+    const conn = activeConn(get().config, connId);
+    if (!conn || !driverOf(conn.db_type).caps.storage) return;
+    if (!get().connSessions[connId]) await get().connectDb(connId);
+    if (!get().connSessions[connId] || !activeConn(get().config, connId)) return;
+    const existing = get().tabs.find((t) => t.kind === "storage" && t.connId === connId);
+    const id = existing?.id ?? nextId("storage");
+    const target = bucket ?? (existing?.kind === "storage" ? existing.bucket : undefined) ?? conn.database ?? "";
+    const title = `${driverOf(conn.db_type).label} · ${conn.name}`;
+    set({
+      tabs: existing
+        ? get().tabs.map((t) => (t.id === id ? { ...t, bucket: target } : t))
+        : [...get().tabs, { id, kind: "storage", connId, bucket: target, title }],
+      activeTabId: id,
+      activeConnId: connId,
+      view: "chat",
+    });
   },
 
   openChatTab: (sessionId) => {
@@ -724,22 +1169,24 @@ export const useStore = create<Store>((set, get) => ({
       activeTabId = tabs.length > 0 ? tabs[tabs.length - 1].id : "";
     }
     const nextTab = tabs.find((t) => t.id === activeTabId);
-    set({ tabs, activeTabId, ...(nextTab?.kind === "messaging" ? { activeConnId: nextTab.connId } : {}) });
+    set({ tabs, activeTabId, ...(nextTab && (nextTab.kind === "messaging" || nextTab.kind === "storage") ? { activeConnId: nextTab.connId } : {}) });
     if (get().tabs.length === 0) get().newChat();
   },
 
   setActiveTab: (activeTabId) => {
     const tab = get().tabs.find((t) => t.id === activeTabId);
-    set({ activeTabId, view: "chat", ...(tab?.kind === "messaging" ? { activeConnId: tab.connId } : {}) });
+    set({ activeTabId, view: "chat", ...(tab && (tab.kind === "messaging" || tab.kind === "storage") ? { activeConnId: tab.connId } : {}) });
   },
 
   sendChat: async (text) => {
-    const { config, activeConnId, dbTree, sessions, tabs, activeTabId } = get();
+    const { config, activeConnId, dbTree, sessions, tabs, activeTabId, connSessions } = get();
     if (!config) return;
     const tab = tabs.find((t) => t.id === activeTabId);
     const sessionId = tab?.kind === "chat" ? tab.sessionId : undefined;
-    if (!sessionId || sessions.find((s) => s.id === sessionId)?.streaming) return;
-    const chosenModelId = sessions.find((s) => s.id === sessionId)?.modelId;
+    const session = sessionId ? sessions.find((s) => s.id === sessionId) : undefined;
+    if (!sessionId || !session || session.streaming) return;
+
+    const chosenModelId = session.modelId;
     const modelId = config.models.some((m) => m.id === chosenModelId)
       ? chosenModelId!
       : config.models.some((m) => m.id === config.active_model_id)
@@ -750,129 +1197,168 @@ export const useStore = create<Store>((set, get) => ({
       set({ view: "settings" });
       return;
     }
-    const conn = activeConn(config, activeConnId);
+    const conn = activeConn(config, activeConnId) || null;
+    const driver = conn ? driverOf(conn.db_type) : null;
+    if (conn && driver && (driver.caps.messaging || driver.caps.storage)) {
+      get().showToast(`${driver.label} 请使用专属工作区；AI 不会自动执行消息或对象存储操作`);
+      return;
+    }
+    if (conn) {
+      if (!connSessions[conn.id]) await get().connectDb(conn.id);
+      if (!get().connSessions[conn.id]) return;
+    }
 
-    const userMsg: ChatMessage = { role: "user", content: text };
-    const assistantMsg: ChatMessage = { role: "assistant", content: "" };
-    const requestId = nextId("req");
-    activeRequestId = requestId;
-    activeRequestSession = sessionId;
+    // 同一会话新一轮提问：先停掉上一轮未完成的循环
+    const previous = agentRuns.get(sessionId);
+    if (previous) previous.stopped = true;
+    agentRuns.delete(sessionId);
+
+    const tree = conn ? dbTree[conn.id] : undefined;
+    const database = !conn || !driver
+      ? ""
+      : driver.caps.mapping
+        ? tree?.selectedTable || conn.database
+        : conn.db_type === "redis" ? "" : tree?.selectedDb || conn.database;
+    const context = buildAgentContext(conn, driver, tree, database);
+    const startIndex = session.messages.length + 1;
 
     set({
-      sessions: sessions.map((s) =>
+      sessions: get().sessions.map((s) =>
         s.id === sessionId
           ? {
               ...s,
               title: s.messages.length === 0 ? text : s.title,
-              messages: [...s.messages, userMsg, assistantMsg],
+              // 上一轮未完成的步骤统一视为中断，避免留下点不动的确认按钮
+              messages: [
+                ...s.messages.map((m) =>
+                  m.status === "pending" || m.status === "running" || m.status === "thinking"
+                    ? { ...m, status: "stopped" as const, canContinue: false }
+                    : m.canContinue ? { ...m, canContinue: false } : m),
+                { role: "user", content: text },
+              ],
               streaming: true,
             }
           : s
       ),
     });
-
-    set({ tabs: get().tabs.map((t) => t.kind === "chat" && t.sessionId === sessionId &&
-      sessions.find((s) => s.id === sessionId)?.messages.length === 0
-      ? { ...t, title: text } : t) });
+    set({
+      tabs: get().tabs.map((t) => t.kind === "chat" && t.sessionId === sessionId && session.messages.length === 0
+        ? { ...t, title: text } : t),
+    });
     saveChats(get().sessions);
-    const history: ChatMessage[] = [
-      ...sessions.find((s) => s.id === sessionId)!.messages.filter((m) => m.content),
-      userMsg,
-    ].map((m) => ({ role: m.role, content: m.content }));
 
-    const sysParts: string[] = [
-      "你是 OrbitData,一个 AI 原生的数据管理助手。回答简洁、专业,使用中文。",
-      "需要查询时,用 ```sql 代码块给出 SQL;如果是 Redis,给出 redis 命令(用 ```redis 代码块)。需要生成数据或脚本时，将完整结果放在同一条回复中，不要拆分成多条回答。",
-    ];
-    if (conn) {
-      const tree = dbTree[conn.id];
-      const driver = driverOf(conn.db_type);
-      const db = driver.caps.databases ? tree?.selectedDb || conn.database : "";
-      sysParts.push(
-        `当前连接: ${conn.name}(${driver.label}${driver.caps.messaging ? "" : `, ${conn.host}:${conn.port}`})` +
-          (db ? `,当前${driver.dbLabel}: ${db}` : "") +
-          (tree?.selectedTable ? `,当前${driver.tableLabel}: ${tree.selectedTable}` : "") +
-          (tree?.selectedColumn ? `,当前字段: ${tree.selectedColumn}` : "") + "。"
-      );
-      if (driver.caps.messaging) sysParts.push(`当前为 ${driver.label} 消息中间件，不支持 SQL。仅解释配置与排障建议；消息正文不会自动提供。发布消息、删除 Topic 和重置消费位点必须在消息工作区由用户显式确认，不得自动执行。`);
-      if (driver.caps.sql) sysParts.push(`生成 SQL 时请使用 ${driver.label} 语法。`);
-      if (driver.caps.mapping) sysParts.push("当前为 Elasticsearch。不要生成 SQL；使用 ```elasticsearch 代码块，第一行为 GET 或 POST 加相对路径（例如 POST /example-index/_search），下一行放 JSON DSL。仅支持 _search、_count、_mapping、_settings、_cluster/health 和 _cat 只读接口；禁止生成写操作或认证信息。");
-    }
-
-    const messages: ChatMessage[] = [
-      { role: "system", content: sysParts.join("\n") },
-      ...history,
-    ];
-
-    const appendDelta = (delta: string) => {
-      set({
-        sessions: get().sessions.map((s) => {
-          if (s.id !== sessionId) return s;
-          const msgs = [...s.messages];
-          const last = msgs[msgs.length - 1];
-          if (last?.role === "assistant") {
-            msgs[msgs.length - 1] = { ...last, content: last.content + delta };
-          }
-          return { ...s, messages: msgs };
-        }),
-      });
-    };
-
-    /** 结束流式状态；stopped 为 true 时给最后一条回答打上中断标记 */
-    const finish = (stopped: boolean) => {
-      const sessions = get().sessions.map((s) => {
-        if (s.id !== sessionId) return s;
-        const msgs = [...s.messages];
-        const last = msgs[msgs.length - 1];
-        if (stopped && last?.role === "assistant") {
-          msgs[msgs.length - 1] = { ...last, stopped: true };
-        }
-        return { ...s, messages: msgs, streaming: false };
-      });
-      set({ sessions });
-      saveChats(sessions);
-    };
-
-    const onEvent = (ev: ChatEvent) => {
-      if (requestId !== activeRequestId) return;
-      if (ev.type === "delta" && ev.text) appendDelta(ev.text);
-      if (ev.type === "done") {
-        activeRequestId = null;
-        activeRequestSession = null;
-        finish(ev.cancelled === true);
-      }
-    };
-
-    try {
-      await api.aiChat(modelId, messages, requestId, onEvent);
-    } catch (e) {
-      if (requestId === activeRequestId) appendDelta(`\n\n> [错误] ${e}`);
-    } finally {
-      if (activeRequestId === requestId) {
-        activeRequestId = null;
-        activeRequestSession = null;
-      }
-      finish(false);
-    }
+    agentRuns.set(sessionId, {
+      goal: text,
+      modelId,
+      conn,
+      database,
+      context,
+      startIndex,
+      steps: 0,
+      lastCommand: "",
+      repeat: 0,
+      failStreak: 0,
+      stopped: false,
+      busy: false,
+    });
+    void driveAgentStep(sessionId);
   },
 
   stopChat: () => {
-    const requestId = activeRequestId;
-    if (!requestId) return;
-    activeRequestId = null;
-    void api.aiCancel(requestId).catch(() => undefined);
-    const sessionId = activeRequestSession;
-    activeRequestSession = null;
+    const { tabs, activeTabId } = get();
+    const tab = tabs.find((t) => t.id === activeTabId);
+    const sessionId = tab?.kind === "chat" ? tab.sessionId : undefined;
     if (!sessionId) return;
-    const sessions = get().sessions.map((s) => {
-      if (s.id !== sessionId) return s;
-      const msgs = [...s.messages];
-      const last = msgs[msgs.length - 1];
-      if (last?.role === "assistant") msgs[msgs.length - 1] = { ...last, stopped: true };
-      return { ...s, messages: msgs, streaming: false };
+    const run = agentRuns.get(sessionId);
+    if (run) {
+      run.stopped = true;
+      agentRuns.delete(sessionId);
+    }
+    patchSession(sessionId, (s) => ({
+      ...s,
+      streaming: false,
+      messages: s.messages.map((m) => {
+        if (m.status === "thinking" || m.status === "running" || m.status === "pending") {
+          return {
+            ...m,
+            status: "stopped",
+            canContinue: false,
+            content: m.command ? m.content : (m.content || "已停止。"),
+          };
+        }
+        return m;
+      }),
+    }));
+    persistSessions();
+  },
+
+  approveAgentStep: async (sessionId, index) => {
+    const run = agentRuns.get(sessionId);
+    const message = get().sessions.find((s) => s.id === sessionId)?.messages[index];
+    if (!run || !message || message.status !== "pending" || !message.command) return;
+    if (message.danger) {
+      const ok = await get().askConfirm({
+        title: "确认执行危险操作",
+        message: `AI 准备执行：\n\n${message.command}\n\n${message.authReason || "该操作可能造成不可恢复的影响"}。确认继续？`,
+        confirmText: "执行",
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    // 弹窗期间用户可能已发起新问题或停止本轮
+    if (run.stopped || !agentRuns.has(sessionId)) return;
+    const latest = get().sessions.find((s) => s.id === sessionId)?.messages[index];
+    if (!latest || latest.status !== "pending") return;
+    run.busy = false;
+    setSessionStreaming(sessionId, true);
+    const ok = await executeAgentCommand(sessionId, index, run);
+    if (ok && !run.stopped && agentRuns.has(sessionId)) void driveAgentStep(sessionId);
+  },
+
+  skipAgentStep: (sessionId, index) => {
+    const run = agentRuns.get(sessionId);
+    if (!run) return;
+    patchMessage(sessionId, index, {
+      status: "skipped",
+      authReason: "",
+      canContinue: false,
+      output: "（用户拒绝执行该命令）",
     });
-    set({ sessions });
-    saveChats(sessions);
+    persistSessions();
+    if (run.stopped) return;
+    setSessionStreaming(sessionId, true);
+    void driveAgentStep(sessionId);
+  },
+
+  resumeAgent: (sessionId) => {
+    const run = agentRuns.get(sessionId);
+    if (!run || run.busy) return;
+    // 只允许继续最近一条提示；旧消息上的按钮不应驱动新的循环
+    const session = get().sessions.find((s) => s.id === sessionId);
+    if (!session?.messages[session.messages.length - 1]?.canContinue) return;
+    run.steps = 0;
+    run.lastCommand = "";
+    run.repeat = 0;
+    run.failStreak = 0;
+    run.stopped = false;
+    run.busy = false;
+    patchSession(sessionId, (s) => ({
+      ...s,
+      streaming: true,
+      messages: s.messages.map((m) => (m.canContinue ? { ...m, canContinue: false } : m)),
+    }));
+    persistSessions();
+    void driveAgentStep(sessionId);
+  },
+
+  openResult: (result, title = "查询结果") => {
+    const tabId = nextId("result");
+    set({
+      tabs: [...get().tabs, { id: tabId, kind: "result", title, result }],
+      activeTabId: tabId,
+      resultView: "table",
+      view: "chat",
+    });
   },
 }));
 

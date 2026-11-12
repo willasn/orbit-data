@@ -25,6 +25,18 @@ pub async fn connect(c: &Connection, database: &str) -> Result<sqlx::postgres::P
         c.port,
         enc(&db)
     );
+    // TLS：require 只加密不校验证书（适配自签 / 未包含当前 IP 的证书），
+    // verify-full 同时校验证书链与主机名（支持证书 SAN 中的 IP 地址）
+    let ssl_mode = match c.tls {
+        Some(true) if c.tls_skip_verify => Some("require"),
+        Some(true) => Some("verify-full"),
+        Some(false) => Some("disable"),
+        None => None,
+    };
+    let url = match ssl_mode {
+        Some(mode) => format!("{url}?sslmode={mode}"),
+        None => url,
+    };
     PgPoolOptions::new()
         .max_connections(4)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -114,9 +126,21 @@ pub async fn list_columns(
 ) -> Result<Vec<ColumnInfo>, String> {
     let pool = connect(c, database).await?;
     let rows = sqlx::query(
-        "SELECT column_name, data_type, is_nullable, '' AS key, '' AS comment \
-         FROM information_schema.columns \
-         WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position",
+        "SELECT c.column_name, c.data_type, c.is_nullable, \
+         CASE WHEN pk.column_name IS NOT NULL THEN 'PRI' ELSE '' END AS column_key, \
+         '' AS comment \
+         FROM information_schema.columns c \
+         LEFT JOIN ( \
+           SELECT kcu.table_schema, kcu.table_name, kcu.column_name \
+           FROM information_schema.table_constraints tc \
+           INNER JOIN information_schema.key_column_usage kcu \
+             ON kcu.constraint_name = tc.constraint_name \
+            AND kcu.table_schema = tc.table_schema \
+           WHERE tc.constraint_type = 'PRIMARY KEY' \
+         ) pk ON pk.table_schema = c.table_schema AND pk.table_name = c.table_name \
+           AND pk.column_name = c.column_name \
+         WHERE c.table_schema = current_schema() AND c.table_name = $1 \
+         ORDER BY c.ordinal_position",
     )
     .bind(table)
     .fetch_all(&pool)
@@ -163,4 +187,27 @@ pub async fn query(
         rows: out,
         duration_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+/// 按主键批量提交结果集修改：同一事务内逐行 UPDATE，失败整体回滚
+pub async fn update_rows(
+    c: &Connection,
+    database: &str,
+    table: &str,
+    rows: &[super::RowUpdate],
+) -> Result<usize, String> {
+    let target = super::qualified_name(super::Quote::Double, "", table);
+    let pool = connect(c, database).await?;
+    let mut tx = pool.begin().await.map_err(|e| format!("开启事务失败: {e}"))?;
+    let mut affected = 0usize;
+    for row in rows {
+        let sql = super::update_statement("UPDATE", &target, "SET", row, super::Quote::Double, false)?;
+        let result = sqlx::query(&sql)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("更新失败: {e}"))?;
+        affected += result.rows_affected() as usize;
+    }
+    tx.commit().await.map_err(|e| format!("提交事务失败: {e}"))?;
+    Ok(affected)
 }

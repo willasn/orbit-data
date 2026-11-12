@@ -39,6 +39,24 @@ pub struct MqttConfig {
     pub will_retain: bool,
 }
 
+/// ClickHouse 连接参数（HTTP 接口）
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct ClickHouseConfig {
+    /// http | https，默认 http
+    pub scheme: String,
+}
+
+/// 对象存储（阿里云 OSS）连接参数
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct OssConfig {
+    /// https | http，默认 https
+    pub scheme: String,
+    /// 可选：STS 临时凭据 token
+    pub sts_token: String,
+}
+
 /// 数据库连接配置
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Connection {
@@ -66,6 +84,17 @@ pub struct Connection {
     pub kafka: Option<KafkaConfig>,
     #[serde(default)]
     pub mqtt: Option<MqttConfig>,
+    #[serde(default)]
+    pub oss: Option<OssConfig>,
+    #[serde(default)]
+    pub clickhouse: Option<ClickHouseConfig>,
+    /// 启用 TLS（TCP 类为 SSL/TLS，HTTP 类为 HTTPS）；None 表示沿用各驱动的历史默认行为
+    #[serde(default)]
+    pub tls: Option<bool>,
+    /// 跳过服务器证书校验（自签证书或证书未包含当前访问 IP / 域名时使用）
+    /// alias 兼容旧配置字段 es_skip_tls_verify
+    #[serde(default, alias = "es_skip_tls_verify")]
+    pub tls_skip_verify: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]

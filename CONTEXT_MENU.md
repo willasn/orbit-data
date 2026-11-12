@@ -1,14 +1,14 @@
 # 右键菜单分类方案（连接级统一 + 下层按大类）
 
-> 状态：**框架已实现，条目分批落地；第八大类 `messaging` 与 Kafka 工作区已实现，真实集群联调待验证；`sql` 大类新增 SQL Server（连接器已实现，真实环境联调待验证）**（2026-10-09）。本文包含设计约定，各类型完成状态与验证结果以 `FEATURE.md` 为准；新增条目后同步该文件。
+> 状态：**框架已实现，条目分批落地；第八大类 `messaging` 与 Kafka 工作区已实现，真实集群联调待验证；第九大类 `storage` 与阿里云 OSS 工作区已实现；`sql` 大类已实现 SQL Server 与 ClickHouse（HTTP 连接器 + 建库 / 建表设计器，真实环境联调待验证）**（2026-11-10）。本文包含设计约定，各类型完成状态与验证结果以 `FEATURE.md` 为准；新增条目后同步该文件。
 > 目标：覆盖 30+ 种常见数据库（含 6 种国产 / 信创登记类型）；新增一种类型时，若大类已存在则**菜单零改动**。
 
 ## 实现状态
 
 | 内容 | 状态 | 位置 |
 |---|---|---|
-| 能力注册表（37 种类型、8 大类；以 `DRIVER_LIST` 实际条目计数，不含未知类型兜底；其中国产 / 信创 6 种仅登记，无后端连接器） | 已实现；Kafka 已注册，构建检查通过，集群联调待完成 | `src/db/drivers.ts` |
-| 菜单条目（连接级 1 份、容器级 / 对象级按 8 大类、列级 1 份；Kafka 不生成库 / 列节点） | 已实现；messaging 菜单由能力位控制 | `src/db/menuItems.ts` |
+| 能力注册表（38 种类型、9 大类；以 `DRIVER_LIST` 实际条目计数，不含未知类型兜底；其中国产 / 信创 6 种仅登记，无后端连接器） | 已实现；Kafka / 阿里云 OSS 已注册并接通工作区 | `src/db/drivers.ts` |
+| 菜单条目（连接级 1 份、容器级 / 对象级按 9 大类、列级 1 份；Kafka / OSS 不生成表 / 列节点） | 已实现；messaging / storage 菜单由能力位控制 | `src/db/menuItems.ts` |
 | 菜单外壳（定位翻转 / 外部点击关闭 / 键盘导航 / 危险项 / 规划中灰显） | 已实现 | `src/components/ContextMenu.tsx` |
 | 左栏连接、库、表、列四类节点右键接入 | 已实现 | `src/components/LeftPanel.tsx` |
 | 左栏展开/收起切换、层级加载态、长列表按需渲染(100 条/批) | 已实现 | `src/components/LeftPanel.tsx` + `store.toggleConnection` / `DbTree.loading` |
@@ -48,6 +48,7 @@
 | `ts` | 时序 | InfluxDB、TDengine、Prometheus、QuestDB |
 | `graph` | 图 | Neo4j、NebulaGraph |
 | `messaging` | 消息流 / 消息队列（第八大类） | Kafka、RabbitMQ、RocketMQ、Pulsar；本版本仅实施 Kafka |
+| `storage` | 对象存储（第九大类） | 阿里云 OSS；Bucket → 对象 / 前缀，无列层，不执行 SQL |
 
 `file`（SQLite / DuckDB 本地文件）**不单独成类**，做成 `caps.localFile` 开关 —— 它们的库/表菜单与 MySQL 几乎一致，仅连接级不同。
 
@@ -121,6 +122,7 @@
 | NebulaGraph | graph | **space** | **tag** / **edge type** | property |
 | Kafka | messaging | **无库层**（集群即连接） | **Topic**（直挂连接） | **无列层**；Partition 是工作区详情，不是 column |
 | RabbitMQ / RocketMQ / Pulsar | messaging | 按各产品命名空间另行映射 | queue / topic 等，待专用驱动适配 | 不套用 SQL column；本版本未注册、未实施 |
+| 阿里云 OSS | storage | **库层 = Bucket** | **对象 / 前缀**（对象在独立工作区展示，不进入左栏） | 无列层；对象元数据在详情面板展示 |
 
 > 实现要点：🇨🇳 为国产 / 信创登记类型，仅完成能力注册，后端无连接器、连接入口未开放；层级映射沿用其上游协议族（MySQL / PG / Oracle 风格）。无库层类型直接跳过库级节点，对象挂到连接下，菜单也不渲染库级。当前注册表以 `caps.databases: false` 表达该行为（`hasDatabaseLayer` 是设计概念，不是当前必备字段）。Kafka 还设置 `caps.columns: false`，禁止把 Partition 填入 `list_columns` 或列级菜单。
 

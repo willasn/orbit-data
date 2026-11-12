@@ -40,7 +40,7 @@ export default function App() {
           {showRight && (
             <PanelResizer side="right" width={rightWidth} onResize={(w) => setPaneWidth("right", w)} />
           )}
-          {showRight && <SqlEditorPanel disabled={activeTabKind === "messaging"} />}
+          {showRight && <SqlEditorPanel disabled={activeTabKind === "messaging" || activeTabKind === "storage"} />}
         </div>
       ) : (
         <SettingsView />

@@ -8,7 +8,7 @@
  */
 
 /** 数据库大类：同一大类共用一套库级 / 表级菜单骨架 */
-export type DbKind = "sql" | "kv" | "doc" | "vector" | "search" | "ts" | "graph" | "messaging";
+export type DbKind = "sql" | "kv" | "doc" | "vector" | "search" | "ts" | "graph" | "messaging" | "storage";
 
 export interface Caps {
   /** 可执行 SQL */
@@ -24,6 +24,8 @@ export interface Caps {
   explain: boolean;
   /** 支持写操作（增删改） */
   write: boolean;
+  /** 结果集单元格可直接编辑并按主键提交 */
+  editRows: boolean;
   truncate: boolean;
   partition: boolean;
   mv: boolean;
@@ -62,6 +64,16 @@ export interface Caps {
   topicManagement: boolean;
   consumerGroups: boolean;
   resetOffsets: boolean;
+  /** 对象存储：启用独立对象工作区 */
+  storage: boolean;
+  /** 对象存储：对象列表 / 浏览 */
+  objects: boolean;
+  /** 对象存储：上传本地文件 */
+  upload: boolean;
+  /** 对象存储：下载对象 */
+  download: boolean;
+  /** 对象存储：生成临时下载地址 */
+  presign: boolean;
 }
 
 export interface DriverMeta {
@@ -77,7 +89,7 @@ export interface DriverMeta {
   /** 标识符引用符 */
   quote: "`" | '"' | "[]" | "";
   /** 当前应用已实现的创建表单与执行方言 */
-  createDialect?: "mysql" | "postgres" | "redis";
+  createDialect?: "mysql" | "postgres" | "redis" | "clickhouse";
   queryLanguage?: "elasticsearch";
   caps: Caps;
 }
@@ -91,6 +103,7 @@ const BASE: Caps = {
   ddl: false,
   explain: false,
   write: false,
+  editRows: false,
   truncate: false,
   partition: false,
   mv: false,
@@ -115,6 +128,11 @@ const BASE: Caps = {
   topicManagement: false,
   consumerGroups: false,
   resetOffsets: false,
+  storage: false,
+  objects: false,
+  upload: false,
+  download: false,
+  presign: false,
 };
 
 /** 关系型 / OLAP 通用能力 */
@@ -136,15 +154,17 @@ const SQL: Caps = {
 const DRIVER_LIST: DriverMeta[] = [
   { type: "kafka", label: "Kafka", kind: "messaging", defaultPort: 9092, color: "#a78bfa", dbLabel: "集群", tableLabel: "Topic", quote: "", caps: { ...BASE, tables: true, write: true, partition: true, stats: true, export: true, messaging: true, browseMessages: true, produceMessages: true, topicManagement: true, consumerGroups: true, resetOffsets: true } },
   { type: "mqtt", label: "MQTT", kind: "messaging", defaultPort: 1883, color: "#ff8c42", dbLabel: "Broker", tableLabel: "主题", quote: "", caps: { ...BASE, messaging: true, produceMessages: true } },
+  // ── storage：对象存储 ────────────────────────────────────────
+  { type: "aliyun_oss", label: "阿里云 OSS", kind: "storage", defaultPort: 443, color: "#ff6a00", dbLabel: "Bucket", tableLabel: "对象", quote: "", caps: { ...BASE, databases: true, write: true, storage: true, objects: true, upload: true, download: true, presign: true } },
   // ── sql：关系型 ──────────────────────────────────────────────
-  { type: "mysql", label: "MySQL", kind: "sql", defaultPort: 3306, color: "#22c55e", dbLabel: "数据库", tableLabel: "表", quote: "`", createDialect: "mysql", caps: SQL },
+  { type: "mysql", label: "MySQL", kind: "sql", defaultPort: 3306, color: "#22c55e", dbLabel: "数据库", tableLabel: "表", quote: "`", createDialect: "mysql", caps: { ...SQL, editRows: true } },
   { type: "mariadb", label: "MariaDB", kind: "sql", defaultPort: 3306, color: "#16a34a", dbLabel: "数据库", tableLabel: "表", quote: "`", caps: SQL },
   { type: "tidb", label: "TiDB", kind: "sql", defaultPort: 4000, color: "#22c55e", dbLabel: "数据库", tableLabel: "表", quote: "`", caps: SQL },
   { type: "oceanbase", label: "OceanBase", kind: "sql", defaultPort: 2881, color: "#0ea5e9", dbLabel: "数据库", tableLabel: "表", quote: "`", caps: SQL },
-  { type: "postgres", label: "PostgreSQL", kind: "sql", defaultPort: 5432, color: "#3b82f6", dbLabel: "数据库", tableLabel: "表", quote: '"', createDialect: "postgres", caps: { ...SQL, mv: true } },
+  { type: "postgres", label: "PostgreSQL", kind: "sql", defaultPort: 5432, color: "#3b82f6", dbLabel: "数据库", tableLabel: "表", quote: '"', createDialect: "postgres", caps: { ...SQL, mv: true, editRows: true } },
   { type: "timescaledb", label: "TimescaleDB", kind: "sql", defaultPort: 5432, color: "#38bdf8", dbLabel: "数据库", tableLabel: "超表", quote: '"', caps: { ...SQL, mv: true, timeRange: true, retention: true } },
   { type: "oracle", label: "Oracle", kind: "sql", defaultPort: 1521, color: "#f59e0b", dbLabel: "Schema", tableLabel: "表", quote: '"', caps: { ...SQL, mv: true } },
-  { type: "sqlserver", label: "SQL Server", kind: "sql", defaultPort: 1433, color: "#e11d48", dbLabel: "数据库", tableLabel: "表", quote: "[]", caps: { ...SQL, mv: true } },
+  { type: "sqlserver", label: "SQL Server", kind: "sql", defaultPort: 1433, color: "#e11d48", dbLabel: "数据库", tableLabel: "表", quote: "[]", caps: { ...SQL, mv: true, editRows: true } },
   { type: "dm", label: "达梦 DM", kind: "sql", defaultPort: 5236, color: "#a855f7", dbLabel: "模式", tableLabel: "表", quote: '"', caps: SQL },
 
   // ── sql：国产 / 信创（按上游协议族登记，后端暂无独立连接器）──────
@@ -155,7 +175,7 @@ const DRIVER_LIST: DriverMeta[] = [
   { type: "oscar", label: "神舟通用 Oscar", kind: "sql", defaultPort: 2003, color: "#84cc16", dbLabel: "模式", tableLabel: "表", quote: '"', caps: SQL },
 
   // ── sql：OLAP / 分析型 ───────────────────────────────────────
-  { type: "clickhouse", label: "ClickHouse", kind: "sql", defaultPort: 8123, color: "#facc15", dbLabel: "数据库", tableLabel: "表", quote: "`", caps: { ...SQL, partition: true, mv: true, index: false } },
+  { type: "clickhouse", label: "ClickHouse", kind: "sql", defaultPort: 8123, color: "#facc15", dbLabel: "数据库", tableLabel: "表", quote: "`", createDialect: "clickhouse", caps: { ...SQL, partition: true, mv: true, index: false, editRows: true } },
   { type: "doris", label: "Doris", kind: "sql", defaultPort: 9030, color: "#f97316", dbLabel: "数据库", tableLabel: "表", quote: "`", caps: { ...SQL, partition: true, mv: true } },
   { type: "starrocks", label: "StarRocks", kind: "sql", defaultPort: 9030, color: "#fb923c", dbLabel: "数据库", tableLabel: "表", quote: "`", caps: { ...SQL, partition: true, mv: true } },
   { type: "hive", label: "Hive", kind: "sql", defaultPort: 10000, color: "#fde047", dbLabel: "数据库", tableLabel: "表", quote: "`", caps: { ...SQL, partition: true, write: false, truncate: false, index: false } },

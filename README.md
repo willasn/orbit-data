@@ -7,10 +7,11 @@ OrbitData 的设计思想参考原生 AI IDE(如 Trae):**以 AI 对话为主要�
 ## 特性一览
 
 - **对话驱动**:内置 AI 助手,自动感知当前连接与数据库上下文,生成的 SQL 可一键"运行"
-- **多连接管理**:直接可用 MySQL / PostgreSQL / SQL Server / Redis / Elasticsearch / Kafka / MQTT,树状浏览数据库 → 表/视图 → 字段；ES 为连接 → 索引 → Mapping 字段,Kafka 为连接 → Topic,MQTT 为连接 → 订阅主题与收发消息
+- **多连接管理**:直接可用 MySQL / PostgreSQL / SQL Server / ClickHouse / Redis / Elasticsearch / Kafka / MQTT / 阿里云 OSS,树状浏览数据库 → 表/视图 → 字段；ES 为连接 → 索引 → Mapping 字段,Kafka 为连接 → Topic,MQTT 为连接 → 订阅主题与收发消息,OSS 为连接 → Bucket（对象在独立工作区浏览）；ClickHouse 为连接 → 数据库 → 表/视图/物化视图 → 字段,走 HTTP 接口
 - **国产 / 信创登记**:达梦、人大金仓 Kingbase、南大通用 GBase、神舟通用 Oscar(信创四大)以及 PolarDB、openGauss 共 6 种已登记能力(端口 / 层级 / 菜单),后端连接器尚未实现;PolarDB 可按 MySQL 类型、Kingbase / openGauss 可按 PostgreSQL 类型填实际端口连接(未验证),详见 [DATABASES.md](./DATABASES.md) 第 3.11 节
 - **Kafka 消息工作区（实现中）**:新增 `messaging` 第八大类，Topic 直挂连接；专用标签页浏览集群与消息、生产消息、管理 Topic 和 Consumer Group。RabbitMQ / RocketMQ / Pulsar 仅作为大类代表，尚未实施
 - **MQTT 消息工作区**:连接级订阅主题、收发消息与发布，支持 MQTT 5.0 / 3.1.1、TCP / TLS / WebSocket、遗嘱消息与常见 Payload 格式；右键连接或双击连接即可打开
+- **阿里云 OSS 对象存储（第九大类 `storage`）**:Endpoint + AccessKey / STS 连接，左栏只展示 Bucket，中栏对象工作区支持前缀浏览、名称 / 时间正倒序、上传下载删除与临时下载地址；不执行 SQL。详细说明见 [docs/data-sources/aliyun-oss.md](./docs/data-sources/aliyun-oss.md)
 - **AI 模型自定义**:支持任意 OpenAI 兼容接口(OpenAI / DeepSeek / Ollama / vLLM 等),可配置地址、密钥、模型 ID、temperature、附加参数,多模型随时切换
 - **SQL 编辑器**:行号、快捷键运行(⌘+Enter)、简易格式化、常用查询保存
 - **数据可视化**:查询结果一键切换表格 / 图表(柱状、折线,自动识别数值列)
@@ -23,7 +24,7 @@ OrbitData 的设计思想参考原生 AI IDE(如 Trae):**以 AI 对话为主要�
 |---|---|
 | 桌面框架 | Tauri 2(Rust) |
 | 前端 | React 18 + TypeScript + Vite + Zustand |
-| 数据库驱动 | sqlx(MySQL / PostgreSQL)、tiberius(SQL Server / TDS)、redis-rs、reqwest(Elasticsearch REST/DSL) |
+| 数据库驱动 | sqlx(MySQL / PostgreSQL)、tiberius(SQL Server / TDS)、reqwest(Elasticsearch REST/DSL、ClickHouse HTTP)、redis-rs |
 | 消息客户端 | rdkafka 0.39 / librdkafka（`cmake-build`、`ssl-vendored`），独立 Kafka 消息工作区；rumqttc 0.25（MQTT 5.0 / 3.1.1、TCP / TLS / WebSocket），独立 MQTT 消息工作区；均不走 SQL 查询协议 |
 | AI 接入 | reqwest 流式调用 OpenAI Chat Completions、OpenAI Responses、Anthropic 接口（兼容旧 Gemini 配置） |
 | 同步 | 系统原生 git |
@@ -60,7 +61,7 @@ npm run tauri build   # 构建发布包
 ## 使用说明
 
 1. **配置 AI 模型**:设置 → AI 模型 → 添加模型(填接口地址、API Key、模型 ID)
-2. **添加连接**:左栏 `+` → 选择类型(MySQL / PostgreSQL / SQL Server / Redis / Elasticsearch / Kafka / MQTT)→ 测试并保存。MQTT 填主机与端口（默认 1883），按需选择 mqtt / mqtts / ws / wss 与 MQTT 版本；保存后右键连接（或双击）打开消息工作区，订阅主题并收发消息。ES 默认端口 9200，主机可填 `https://es.example.com`，HTTPS 证书需受信任，用户名/密码可留空（匿名访问）或用于 Basic Auth。SQL Server 默认端口 1433，使用 SQL Server 身份认证（用户名 / 密码），见下方专门说明。国产 / 信创库尚未开放独立入口：PolarDB 可先选 MySQL 类型、Kingbase / openGauss 可先选 PostgreSQL 类型并填实际端口（未验证），达梦 / GBase / Oscar 需要等待连接器落地
+2. **添加连接**:左栏 `+` → 选择类型(MySQL / PostgreSQL / SQL Server / ClickHouse / Redis / Elasticsearch / Kafka / MQTT)→ 测试并保存。ClickHouse 走 HTTP 接口，协议 http / https 对应端口 8123 / 8443（原生 TCP 9000 不支持），用户名为 `default` 或自定义账号。MQTT 填主机与端口（默认 1883），按需选择 mqtt / mqtts / ws / wss 与 MQTT 版本；保存后右键连接（或双击）打开消息工作区，订阅主题并收发消息。ES 默认端口 9200，主机可填 `https://es.example.com`，HTTPS 证书需受信任，用户名/密码可留空（匿名访问）或用于 Basic Auth。SQL Server 默认端口 1433，使用 SQL Server 身份认证（用户名 / 密码），见下方专门说明。国产 / 信创库尚未开放独立入口：PolarDB 可先选 MySQL 类型、Kingbase / openGauss 可先选 PostgreSQL 类型并填实际端口（未验证），达梦 / GBase / Oscar 需要等待连接器落地
 3. **开始对话**:选中连接后直接向 AI 提问,SQL 或 `elasticsearch` 代码块点击「运行」即可执行并打开结果页。ES 也可右键索引预览，或在控制台输入 `GET /_cluster/health`；查询支持 `POST /example-index/_search` 后换行填写 JSON，选中索引后可直接填写 JSON DSL；当前仅支持只读接口
 4. **同步配置**:设置 → Git 同步 → 配置仓库路径(可填远程 URL)→ 初始化 → 提交并推送;其他设备「拉取同步」即可还原全部连接与模型配置
 
@@ -76,7 +77,7 @@ npm run tauri build   # 构建发布包
 ### SQL Server 连接
 
 - 默认端口 1433,使用 SQL Server 身份认证(用户名 + 密码);暂不支持 Windows 集成认证 / AAD 与命名实例(SQL Browser)
-- 连接走 TDS:加密保持开启但**不校验服务器证书**(`TrustServerCertificate`),自签或内网证书可直接连上;需要严格校验证书的环境请先确认风险
+- 连接走 TDS:默认加密(与历史行为一致),可在连接对话框中开启「跳过证书校验」以适配自签 / IP 证书;关闭 TLS 后不再加密
 - 对象树:库级 = database,表级 = 表 / 视图;`dbo` 下的表不带前缀,其他 schema 显示为 `schema.table`,标识符按 `[name]` 转义
 - 方言差异:取前 N 行用 `TOP n`(不是 `LIMIT`),执行计划用 `SET SHOWPLAN_ALL ON`(不是 `EXPLAIN`);菜单生成的预览 / 模板 / 结构查询已按方言区分
 - 不支持客户端批处理分隔符 `GO`;一次执行多条语句时只展示第一个结果集

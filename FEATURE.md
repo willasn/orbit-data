@@ -1,15 +1,17 @@
 # FEATURE.md — 功能清单与开发进度
 
-> 更新日期: 2026-11-02 · 版本: v0.1.5 · 新增 MQTT 连接与消息工作区（rumqttc 0.25；MQTT 5.0 / 3.1.1 连接、订阅、发布与收发已用测试 Broker 验证）；此前新增 SQL Server 连接器（tiberius / TDS，编译检查通过，真实环境联调待进行）与 messaging 大类 / Kafka 专项、5 种国产 / 信创数据库登记（仅注册，无后端连接器）
+> 更新日期: 2026-11-12 · 版本: v0.1.9 · 右栏 SQL 编辑器调整：软换行 + 行号逐行对齐、按连接自动保存草稿、按连接归档 SQL 历史（新建 / 历史入口，支持单条删除）、运行 / 格式化按钮移至顶部数据库下拉右侧，移除「保存」按钮与已保存查询列表；此前新增的智能补全（关键字 / 库 / 表 / 列，候选来自当前连接的真实元数据）；OSS 对象浏览增强：图片 / 文本在线预览（可关闭）、修改时间区间筛选、整目录排序与分页跳页、搜索 / 排序 / 每页 / 时间单行「查询」、切换 Bucket 自动重置；此前 v0.1.8 的结果集单元格编辑、v0.1.7 的 ClickHouse 连接（HTTP 8123 / HTTPS 8443）、对象存储（阿里云 OSS）、MQTT、Kafka、SQL Server 状态保持不变
 
 图例: [x] 已完成 · [~] 部分完成 · [ ] 规划中
 
 ## 1. 连接管理
 
 - [x] 新建/编辑/删除数据库连接(名称、主机、端口、用户名、密码、默认库、标识颜色)
-- [x] 直接可用:MySQL、PostgreSQL、SQL Server、Redis、Elasticsearch、Kafka、MQTT 七种类型具备后端连接器与创建入口
+- [x] 新建/编辑连接对话框右侧「已实现功能」面板:随左侧连接类型切换,按功能维度(如列表搜索 / 对象操作 / 预览)聚合展示该类型真实落地的能力;窄窗口下收窄并可独立滚动,原有类型列表 / 表单 / 按钮布局不变(2026-11-12)
+- [x] 直接可用:MySQL、PostgreSQL、SQL Server、Redis、Elasticsearch、Kafka、MQTT、阿里云 OSS 八种类型具备后端连接器与创建入口
 - [~] 国产 / 信创:达梦 DM、人大金仓 Kingbase、南大通用 GBase、神舟通用 Oscar(信创四大)+ PolarDB、openGauss 共 6 种仅完成能力注册表,后端无连接器、创建入口未开放;MySQL / PG 协议族类型可尝试用对应已支持类型连接(未验证),详见 [DATABASES.md](./DATABASES.md) 第 3.11 节
-- [x] Elasticsearch: HTTP/HTTPS（验证证书）、可选 Basic Auth、连接测试、索引直挂连接、嵌套 Mapping 与 multi-fields 浏览
+- [x] Elasticsearch: HTTP/HTTPS（默认 HTTPS，可勾选跳过证书校验以适配自签证书 / 证书域名不匹配）、可选 Basic Auth、连接测试、索引直挂连接、嵌套 Mapping 与 multi-fields 浏览
+- [x] 通用 TLS 选项（2026-11-12）:MySQL / PostgreSQL / SQL Server / Redis 可启用 TLS 并选择是否跳过证书校验；Elasticsearch 可切换 HTTP / HTTPS；ClickHouse / 阿里云 OSS 在 HTTPS 下可跳过证书校验，适配 IP 证书与自签证书
 - [x] Elasticsearch: 只读 REST/JSON DSL 控制台、JSON 格式化、文档预览、Mapping/Settings、文档计数；搜索默认 500 条、上限 1000 条，聚合结果保留 JSON
 - [x] Elasticsearch: AI 生成 `elasticsearch` 请求代码块，可一键运行；不支持索引写操作、API Key、自定义 CA 或深分页
 - [x] 连接测试(保存前可验证)
@@ -23,7 +25,7 @@
 - [x] 对象树加载态:展开层级显示旋转图标 + 「正在加载中…」,失败显示「加载失败,点击重试」
 - [x] 对象树长列表按需渲染:各层级首屏 100 条,滚动到底或点击「加载更多(剩余 N)」增量追加
 - [x] 右键菜单框架:连接级统一 + 库级/表级按大类 + 列级统一(能力位 `caps` 驱动,见 [CONTEXT_MENU.md](./CONTEXT_MENU.md))
-- [x] 数据库能力注册表 `src/db/drivers.ts`:按 `DRIVER_LIST` 实际统计为 37 种、8 大类（含已注册的 Kafka 与 6 种国产 / 信创类型；不含未知类型兜底），注册不等于已有连接器；既有大类新增类型复用菜单能力定义
+- [x] 数据库能力注册表 `src/db/drivers.ts`:按 `DRIVER_LIST` 实际统计为 38 种、9 大类（含已注册的 Kafka 与 6 种国产 / 信创类型；不含未知类型兜底），注册不等于已有连接器；既有大类新增类型复用菜单能力定义
 - [x] 连接级菜单:新建数据库…(CREATE DATABASE,按方言,成功后刷新树)、刷新元数据、编辑、重命名、复制为新建、测试连接、复制地址(不含密码)、复制 AI 上下文、删除连接
 - [x] 库级菜单(MySQL / PG):新建数据库…、新建表…(表设计窗口配置字段/主键/自增并预览 DDL,创建后刷新树)、删除库(DROP DATABASE,手输库名二次确认,成功后刷新树)
 - [x] 库级菜单(Redis):新建键…(窗口输入字符串值及可选 TTL,仅不存在时创建并刷新键列表)、清空当前逻辑库(SELECT + FLUSHDB,手输库号二次确认)
@@ -36,13 +38,18 @@
 - [x] 连接分组:连接配置 `group` 字段、左栏分组头(可折叠,组内缩进)、右键「移动到分组…」(留空移出分组)、折叠状态本地记忆
 - [x] 连接 / 断开:右键「连接 / 断开连接」、左栏状态点(绿=已连接)、断开后清空该连接元数据缓存、断开态执行 SQL 自动重连
 - [ ] SSH 隧道 / 通用数据库 SSL 连接参数（Kafka 专用 SSL / SASL 见第 8 节）
-- [ ] SQLite / ClickHouse / MongoDB 连接器
+- [x] ClickHouse: HTTP 接口（默认 8123，HTTPS 8443）、用户名 / 密码、`SELECT version()` 连接测试、对象树、SQL 执行、建库与建表设计器（详见第 11 节）
+- [ ] SQLite / MongoDB 连接器
 - [ ] 国产信创连接器:优先复用上游协议(PolarDB → MySQL 驱动,Kingbase / openGauss → PG 驱动),随后才是达梦 / GBase / Oscar 的独立方言适配
 
 ## 2. AI 对话(核心)
 
 - [x] 对话为主驱动的交互模式(多对话标签页)
 - [x] AI 流式输出(SSE,Tauri Channel 通道)
+- [x] Agent 执行循环：AI 自主执行只读查询、读取结果并自动继续下一步，直到目标完成
+- [x] 写 / 改 / 删除 / DDL 操作在消息内暂停，提供「执行 / 跳过」按钮；`DROP`、`TRUNCATE`、无条件 `UPDATE / DELETE` 额外弹窗二次确认
+- [x] Trae 风格单页时间线：思考、命令、执行输出、结果表格内联展示，结果可打开到结果页
+- [x] Agent 安全护栏：单轮 40 步上限（可继续执行）、同一命令连续 3 次暂停、连续 3 次执行失败暂停
 - [x] 上下文感知:自动注入当前连接类型、地址、所选数据库
 - [x] 中栏上下文选择:已保存连接及按驱动能力递进选择库/表(键)/字段,所选对象注入对话提示
 - [x] 对话级模型选择:中栏切换已配置模型,删除后回退默认模型
@@ -71,24 +78,28 @@
 ## 4. SQL 编辑器(辅助窗口)
 
 - [x] 行号显示、等宽编辑区
+- [x] 软换行：长 SQL 按编辑器宽度换行，不再出现横向滚动条；行号按软换行后的实际高度逐行对齐
+- [x] 草稿自动保存：按连接隔离持久化到 localStorage（300ms 合并写入），切换连接 / 标签 / 重启后恢复
+- [x] SQL 历史：右上角「新建」「历史」；新建时归档当前内容（空内容或与最近一条相同则不写），历史可单条删除（二次确认）；按连接保留最近 30 条、总量上限 300 条；仅存 SQL 文本、时间与连接名称，不含任何凭据
 - [x] ⌘/Ctrl + Enter 快捷运行
 - [x] 简易格式化(关键字大写 + 子句换行)
-- [x] 常用查询保存(localStorage,最近 20 条)
+- [x] 运行 / 格式化按钮位于顶部、数据库下拉框右侧（底部不再保留按钮栏）
 - [x] 数据库选择下拉
+- [x] 右栏仅保留编辑器本身：结果统一在中栏「查询结果」标签页展示（已移除右栏结果 / 可视化面板）
 - [x] Redis 命令模式(直接执行 redis 命令)
 - [ ] 语法高亮(CodeMirror 6 按需引入)
-- [ ] 智能补全(基于对象树元数据)
+- [x] 智能补全(基于真实元数据):SQL 关键字 / 当前连接的库名 / 当前库表名 / 选中表与 SQL 引用表的列名；候选随当前连接与库实时拉取(30 秒缓存,失败不外造假数据),↑↓ 选择、Enter/Tab 采纳、Esc 关闭、Ctrl+Space 手动触发；仅关系型 / OLAP 连接启用(Redis、Elasticsearch 等命令控制台不启用)
 - [ ] 执行计划查看(EXPLAIN)
 
 ## 5. 结果查看与可视化
 
 - [x] 通用查询结果表格(列名、行号、NULL 识别、数值高亮)
-- [x] 结果标签页(中栏)+ 右栏结果区双视图
+- [x] 结果统一展示在中栏「查询结果」标签页（无该标签时自动打开，已存在时复用并刷新）
 - [x] 执行耗时与行数统计(结果集上限 500 行)
 - [x] SVG 图表:自动识别分类列与数值列,柱状/折线切换,多系列
 - [ ] 悬浮 tooltip 与坐标缩放
 - [ ] CSV / Excel 导出
-- [ ] 单元格编辑与提交(UPDATE 生成)
+- [x] 单元格编辑与提交(UPDATE 生成)：仅单表查询且主键列在结果中时可编辑，双击单元格修改、输入 NULL 设为空，提交时按主键批量生成 UPDATE；MySQL / PostgreSQL / SQL Server 在同一事务内提交，失败整体回滚；ClickHouse 使用 `ALTER TABLE … UPDATE`（`mutations_sync = 1`）逐行提交，适用于 MergeTree 系列表
 - [ ] 大结果集虚拟滚动
 
 ## 6. Git 同步
@@ -145,6 +156,47 @@
 - [x] 发布：Topic（历史订阅下拉）、QoS、Retain、Plaintext / JSON / Base64 / Hex Payload、`Cmd/Ctrl + Enter` 发送
 - [ ] mqtts / wss 自签证书跳过校验、MQTT 5 用户属性与订阅选项（No Local、Retain as Published、Retain Handling）、消息导出、Topic 树 / 仪表盘等视图器功能
 
+## 10. 对象存储 · 阿里云 OSS（v0.1.6，2026-11-10）
+
+> 详细说明见 [docs/data-sources/aliyun-oss.md](./docs/data-sources/aliyun-oss.md)。
+
+- [x] 新增第九大类 `storage` 与 `aliyun_oss` 类型：连接配置含 Endpoint、协议（https / http）、AccessKey ID / Secret、默认 Bucket、可选 STS Token
+- [x] 后端 `src-tauri/src/db/oss.rs`：OSS V1 签名（HMAC-SHA1）、HeadBucket / ListBuckets 连接测试、ListObjectsV2 前缀分页、HeadObject、DeleteObject、签名 URL、流式上传与下载
+- [x] 左栏只展示 Bucket：双击连接或 Bucket 打开对象工作区；连接断开 / 编辑 / 删除时关闭对应标签页
+- [x] 中栏独立 `StorageWorkspace` 标签页：Bucket 切换、面包屑、前缀搜索、分页浏览（每页 50 / 100 / 200 / 500，支持首页 / 上一页 / 下一页 / 末页与输入页码跳转）
+- [x] 对象列表排序：名称 / 修改时间 × 正序 / 倒序，文件夹始终优先；由后端聚合整个目录后排序再切片分页，排序作用于完整列表
+- [x] 修改时间区间筛选：起止时间（`datetime-local`）与搜索 / 排序 / 每页条数同排，点击「查询」统一下发，时间区间可留空；文件夹不受时间区间限制
+- [x] Bucket 切换：左栏或顶部重新选择 Bucket 时，清空列表、分页与全部筛选条件并按第 1 页重新加载，不残留上一个 Bucket 的数据
+- [x] 列表索引缓存：同一连接 / Bucket / 前缀 / 时间区间的结果缓存 30 秒，翻页与切换排序不重复扫描；上传 / 删除后自动失效，「刷新」强制重扫
+- [x] 对象详情：大小、Content-Type、存储类型、最后修改、ETag、Bucket
+- [x] 在线预览：图片走签名 URL 直接展示，常见文本（txt / md / json / csv / log / xml / yaml / sql 等）由后端读取内容预览，超过 512 KB 自动截断提示；预览可关闭，关闭后列表区域恢复原高度，可随时重新打开
+- [x] 上传：系统文件对话框、多文件顺序上传、同名对象覆盖确认、默认按扩展名推断 Content-Type
+- [x] 下载：系统保存对话框、后端流式写文件
+- [x] 删除：单对象删除，需手输完整 Key 确认
+- [x] 临时下载地址：15 分钟 / 1 小时 / 8 小时，展示失效时间，支持复制与浏览器打开；STS 场景附加 `security-token`
+- [x] 新增命令 `oss_request` / `oss_transfer` 与 `tauri-plugin-dialog` 权限（dialog:allow-open / allow-save）
+- [ ] Bucket 创建 / 删除、分片上传与断点续传、批量删除、移动 / 重命名、传输进度与取消
+
+## 11. ClickHouse（v0.1.7，2026-11-10）
+
+> 详细说明见 [docs/data-sources/clickhouse.md](./docs/data-sources/clickhouse.md)。本节 `[x]` 表示代码已实现并通过 `npx tsc --noEmit` 与 `cargo check`；真实 HTTP 端口联调待进行。
+
+- [x] 新增连接类型 `clickhouse`（`sql` 大类）：HTTP 接口，协议 http / https（端口默认 8123 / 8443），用户名（默认 `default`）、密码、默认数据库
+- [x] 配置字段 `clickhouse.scheme` 使用 `serde(default)`，兼容既有配置与 Git 同步
+- [x] 连接测试：`SELECT version()`，返回版本号；填入原生 TCP 9000 时提示改用 HTTP 8123
+- [x] 后端 `src-tauri/src/db/clickhouse.rs`：HTTP POST 执行 SQL、`X-ClickHouse-User / Key` 认证、`default_format=JSON` 结果解析
+- [x] 对象树：`system.databases` → `system.tables`（按 engine 归类表 / 视图 / 物化视图 / 字典）→ `system.columns`（名称 / 类型 / 可空 / 主键 / 注释与默认值）
+- [x] 元数据查询使用 ClickHouse 参数占位符（`param_db` / `param_table`），不拼接用户输入
+- [x] SQL 执行：任意 SQL（含 DDL / DML），DDL 空响应视为成功；`UInt64` 等 64 位整数转字符串保精度，`Array / Map / Tuple` 转文本，非 JSON 结果回退为原文展示
+- [x] 兼容 ClickHouse 26.x 的 JSON 对象行输出（`data` 为以列名为 key 的对象）与旧版数组行输出
+- [x] 右键菜单：预览前 100 行、查看结构 / DDL（`SHOW CREATE TABLE`）、SELECT 模板、执行计划（`EXPLAIN`）、行计数、复制表名、刷新元数据等复用现有条目
+- [x] 建库：`CREATE DATABASE`（成功后刷新对象树）
+- [x] 建表设计器（ClickHouse 方言）：字段名 / 类型 / 长度精度 / 可空（`Nullable`）/ 默认值 / 注释，表级 Engine、`ORDER BY`、`PARTITION BY`、`PRIMARY KEY`、`TTL`
+- [x] 建表校验：控制字符、字段重复、`Decimal / FixedString / DateTime64` 长度格式、MergeTree 系列必须填写排序键
+- [x] AI 对话按 `driver.label` 自动注入「使用 ClickHouse 语法」，生成 SQL 可一键运行
+- [x] 真实环境联调（ClickHouse 26.8.36.3，HTTP 8123）：连接测试、数据库 / 表 / 字段元数据、复杂类型查询、建表 / 写入 / 查询 / 删除均通过（2026-11-10）；界面层操作（右键菜单、建表窗口、AI 一键运行）沿用现有 SQL 类型通用逻辑，未单独回归
+- [ ] 原生 TCP 9000、集群 / 分片拓扑、分区可视化、物化视图与字典管理、导入导出
+
 ## 已知限制
 
 1. PostgreSQL 列信息暂未读取主键/注释(仅 schema/类型/可空)
@@ -160,3 +212,8 @@
 11. SQL Server 的「新建库 / 新建表」设计窗口仍限 MySQL / PG（方言未适配），其余只读浏览、查询与 SQL 执行可用
 12. MQTT 消息保存在后端内存缓冲（每连接 2000 条），关闭应用或断开连接后不保留；订阅列表与发布草稿按连接存于本地 localStorage，不随 Git 同步
 13. MQTT 配置含明文用户名 / 密码；证书只记录路径，不随 Git 同步，跨设备需单独部署证书。ws / wss 依赖 Broker 的 WebSocket 监听与 `/mqtt` 路径配置
+14. OSS 列表接口只保证 Key 字典序，既不支持按修改时间排序也不支持时间区间与随机跳页；当前实现由后端遍历前缀下全部对象后本地筛选 / 排序 / 切片（索引缓存 30 秒）。单次扫描上限 20 万对象，超出时列表提示「结果可能不完整」，超大 Bucket 建议先用前缀搜索缩小范围
+15. OSS 单次简单 PUT 上限约 5 GB，未实现分片上传 / 断点续传；暂不支持删除前缀（文件夹）、批量删除与 Bucket 管理
+16. OSS 上传 / 下载只有「进行中 / 完成 / 失败」状态，没有百分比进度与取消；临时下载地址在有效期内对任何持有者公开，请勿传播，且不会写入日志
+17. OSS 在线预览仅覆盖常见图片与文本类型，文本最多读取 512 KB；文档、压缩包、音视频等需下载后查看，预览内容不落盘、不写日志
+18. ClickHouse 仅支持 HTTP 接口（默认 8123，HTTPS 8443），不支持原生 TCP 9000；一次只执行一条语句，结果集上限 500 行，查询超时 60 秒；物化视图 / 字典仅做只读浏览，分区与集群拓扑未实现。已在 ClickHouse 26.8 上完成真实环境联调

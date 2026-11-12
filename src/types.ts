@@ -27,6 +27,18 @@ export interface MqttConfig {
   will_retain: boolean;
 }
 
+export interface OssConfig {
+  /** https | http */
+  scheme: "https" | "http";
+  /** 可选：STS 临时凭据 token */
+  sts_token: string;
+}
+
+export interface ClickHouseConfig {
+  /** http | https，默认 http */
+  scheme: "http" | "https";
+}
+
 /// 数据库连接配置
 export interface Connection {
   id: string;
@@ -44,6 +56,12 @@ export interface Connection {
   group: string;
   kafka?: KafkaConfig | null;
   mqtt?: MqttConfig | null;
+  oss?: OssConfig | null;
+  clickhouse?: ClickHouseConfig | null;
+  /** 启用 TLS（TCP 类为 SSL/TLS，HTTP 类为 HTTPS）；未设置时沿用各类型原有默认行为 */
+  tls?: boolean;
+  /** 跳过服务器证书校验（自签证书或证书未包含当前访问 IP / 域名时使用） */
+  tls_skip_verify?: boolean;
 }
 
 export interface MqttMessage {
@@ -108,6 +126,52 @@ export interface ChatMessage {
   content: string;
   /** 该条回答被用户主动中断(已生成内容保留) */
   stopped?: boolean;
+  /** Agent 步骤：待执行的命令 */
+  command?: string;
+  /** 命令类型(用于代码块标注) */
+  commandKind?: "sql" | "redis" | "elasticsearch";
+  /** Agent 步骤状态 */
+  status?: "thinking" | "pending" | "running" | "done" | "error" | "skipped" | "stopped";
+  /** 需要用户确认的原因(写入 / 修改 / 删除等) */
+  authReason?: string;
+  /** 高风险破坏性操作：确认时额外弹窗 */
+  danger?: boolean;
+  /** 执行输出(回填给模型并展示) */
+  output?: string;
+  /** 输出概要(行数 / 耗时) */
+  outputMeta?: string;
+  /** 查询结果(仅内存展示，不持久化) */
+  result?: QueryResult;
+  /** 达到步数上限：显示「继续执行」 */
+  canContinue?: boolean;
+}
+
+/** Agent 已执行的一步(回填给模型) */
+export interface AgentStep {
+  command: string;
+  output: string;
+}
+
+/** Agent 单步决策入参 */
+export interface AgentStepInput {
+  goal: string;
+  steps: AgentStep[];
+  context?: string;
+  db_type?: string;
+  remaining_steps?: number;
+}
+
+/** Agent 单步决策结果 */
+export interface AgentStepResult {
+  action: "run" | "done";
+  thought?: string | null;
+  command?: string | null;
+  summary?: string | null;
+  requires_auth: boolean;
+  auth_reason?: string | null;
+  danger: boolean;
+  danger_reason?: string | null;
+  raw: string;
 }
 
 export interface TableInfo {
@@ -132,6 +196,31 @@ export interface QueryResult {
   duration_ms: number;
   /** 结果表头左侧的补充说明(如 Redis 键的类型与 TTL) */
   meta?: string;
+}
+
+/** 结果集单格修改 */
+export interface GridCellEdit {
+  column: string;
+  value: CellValue;
+}
+
+/** 结果集按行提交：keys 为主键原始值，values 为变更列 */
+export interface RowUpdate {
+  keys: GridCellEdit[];
+  values: GridCellEdit[];
+}
+
+/** 结果集可编辑上下文：仅单表查询且主键列在结果中时存在 */
+export interface ResultEditSource {
+  connId: string;
+  database: string;
+  /** 产生该结果的 SQL，提交后用于刷新 */
+  sql: string;
+  table: string;
+  /** 结果列名 -> 表列名（大小写不敏感匹配） */
+  columnMap: Record<string, string>;
+  /** 主键列（表列名） */
+  pkColumns: string[];
 }
 
 /** Redis 单键内容预览(后端按值类型展开成列与行,见 CONTEXT_MENU.md 5.2) */
@@ -159,8 +248,88 @@ export interface ChatSession {
 
 export type Tab =
   | { id: string; kind: "chat"; sessionId: string; title: string }
-  | { id: string; kind: "result"; title: string; result: QueryResult }
-  | { id: string; kind: "messaging"; title: string; connId: string; topic?: string };
+  | { id: string; kind: "result"; title: string; result: QueryResult; edit?: ResultEditSource }
+  | { id: string; kind: "messaging"; title: string; connId: string; topic?: string }
+  | { id: string; kind: "storage"; title: string; connId: string; bucket?: string; prefix?: string };
+
+/* ────────────────── 对象存储（阿里云 OSS） ────────────────── */
+
+export interface OssBucket {
+  name: string;
+  creation_date: string;
+}
+
+export interface OssObject {
+  key: string;
+  is_folder: boolean;
+  size: number;
+  last_modified: string;
+  etag: string;
+  storage_class: string;
+}
+
+export type OssSortMode = "name-asc" | "name-desc" | "mtime-asc" | "mtime-desc";
+
+export interface OssObjectList {
+  prefix: string;
+  objects: OssObject[];
+  /** 时间筛选后的对象总数（整个前缀，而非当前页） */
+  total: number;
+  /** 后端校正后的当前页（1 基） */
+  page: number;
+  page_size: number;
+  /** 扫描量达到上限，结果可能不完整 */
+  scan_truncated: boolean;
+}
+
+export interface OssObjectDetail {
+  key: string;
+  size: number;
+  content_type: string;
+  etag: string;
+  last_modified: string;
+  storage_class: string;
+  content_md5: string;
+}
+
+export interface OssPresignResult {
+  url: string;
+  /** 失效时间（毫秒时间戳） */
+  expires_at: number;
+}
+
+export interface OssObjectText {
+  key: string;
+  content_type: string;
+  size: number;
+  text: string;
+  /** 超过预览上限，内容已截断 */
+  truncated: boolean;
+}
+
+export type OssRequest = {
+  action: "list_buckets" | "list_objects" | "get_object_text" | "head_object" | "delete_object" | "presign_url";
+  bucket?: string;
+  prefix?: string;
+  /** ISO 8601 时间，服务端按最后修改时间过滤 */
+  start_time?: string;
+  end_time?: string;
+  sort?: OssSortMode;
+  /** 1 基页码 */
+  page?: number;
+  page_size?: number;
+  /** 跳过索引缓存，强制重新扫描 Bucket */
+  refresh?: boolean;
+  key?: string;
+  expires_secs?: number;
+};
+
+export type OssTransferRequest = {
+  action: "upload_file" | "download_file";
+  bucket: string;
+  key: string;
+  local_path: string;
+};
 
 export type KafkaRequest = {
   action: "metadata" | "list_topics" | "topic_detail" | "brokers" | "read" | "produce" |

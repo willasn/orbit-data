@@ -169,6 +169,35 @@ async fn kafka_request(
 }
 
 #[tauri::command]
+async fn oss_request(
+    config: tauri::State<'_, ConfigStore>,
+    sessions: tauri::State<'_, db::session::SessionStore>,
+    conn_id: String,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let conn = config.read()?.connections.into_iter().find(|c| c.id == conn_id)
+        .ok_or("连接不存在")?;
+    if conn.db_type != "aliyun_oss" { return Err("该连接不支持对象存储操作".into()); }
+    if !sessions.snapshot().contains_key(&conn_id) { return Err("连接已断开，请重新连接".into()); }
+    db::oss::request(&conn, request).await
+}
+
+/// 对象上传 / 下载：本地路径由系统文件对话框提供，后端流式读写
+#[tauri::command]
+async fn oss_transfer(
+    config: tauri::State<'_, ConfigStore>,
+    sessions: tauri::State<'_, db::session::SessionStore>,
+    conn_id: String,
+    request: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let conn = config.read()?.connections.into_iter().find(|c| c.id == conn_id)
+        .ok_or("连接不存在")?;
+    if conn.db_type != "aliyun_oss" { return Err("该连接不支持对象存储操作".into()); }
+    if !sessions.snapshot().contains_key(&conn_id) { return Err("连接已断开，请重新连接".into()); }
+    db::oss::transfer(&conn, request).await
+}
+
+#[tauri::command]
 async fn mqtt_subscribe(
     mqtt: tauri::State<'_, db::mqtt::MqttManager>,
     conn_id: String,
@@ -250,6 +279,16 @@ async fn run_query(
 }
 
 #[tauri::command]
+async fn update_rows(
+    conn: Connection,
+    database: String,
+    table: String,
+    rows: Vec<db::RowUpdate>,
+) -> Result<usize, String> {
+    db::update_rows(&conn, &database, &table, &rows).await
+}
+
+#[tauri::command]
 async fn redis_command(conn: Connection, args: Vec<String>) -> Result<String, String> {
     db::redis::command(&conn, &args).await
 }
@@ -285,6 +324,22 @@ async fn ai_chat(
 #[tauri::command]
 fn ai_cancel(request_id: String) {
     ai::cancel(&request_id);
+}
+
+/// Agent 决策一步：不执行命令，只返回下一步动作与授权级别（循环由前端驱动）
+#[tauri::command]
+async fn ai_agent_step(
+    state: tauri::State<'_, ConfigStore>,
+    model_id: String,
+    input: ai::AgentInput,
+) -> Result<ai::AgentStepResult, String> {
+    let cfg = state.read()?;
+    let model = cfg
+        .models
+        .into_iter()
+        .find(|m| m.id == model_id)
+        .ok_or_else(|| "未找到指定的 AI 模型配置,请先在设置中添加".to_string())?;
+    ai::agent_step(&model, &input).await
 }
 
 #[tauri::command]
@@ -330,6 +385,8 @@ pub fn run() {
     tauri::Builder::default()
         // 自动更新：更新源与公钥见 tauri.conf.json 的 plugins.updater
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // 对象存储上传 / 下载：系统文件选择与保存对话框
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let dir = app
                 .path()
@@ -352,6 +409,8 @@ pub fn run() {
             disconnect_db,
             connection_status,
             kafka_request,
+            oss_request,
+            oss_transfer,
             mqtt_subscribe,
             mqtt_unsubscribe,
             mqtt_publish,
@@ -361,11 +420,13 @@ pub fn run() {
             list_tables,
             list_columns,
             run_query,
+            update_rows,
             redis_command,
             redis_key_view,
             test_model,
             ai_chat,
             ai_cancel,
+            ai_agent_step,
             save_sync_config,
             sync_init,
             sync_commit,

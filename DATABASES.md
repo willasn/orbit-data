@@ -1,7 +1,8 @@
 # DATABASES.md — 数据库支持列表
 
-> 更新日期: 2026-10-09 · 版本: v0.1.4 · SQL Server 完成 ①②③ 三层（`mssql.rs` 后端连接器 + 创建入口 + 能力注册表），真实环境联调待进行；此前的 messaging 大类与 Kafka（代码完成，编译通过，真实集群验收待进行）、6 种国产 / 信创数据库登记（仅注册）保持不变
+> 更新日期: 2026-11-10 · 版本: v0.1.7 · ClickHouse 完成 ①②③ 三层（`clickhouse.rs` 后端连接器 + 创建入口 + 能力注册表），走 HTTP 接口（8123 / HTTPS 8443），已在 ClickHouse 26.8 真实环境完成冒烟；此前的 SQL Server、messaging / Kafka、storage / 阿里云 OSS 与 6 种国产 / 信创数据库登记保持不变
 > 本文件是「哪些数据库能用、用到什么程度」的唯一清单。能力位与菜单设计见 [CONTEXT_MENU.md](./CONTEXT_MENU.md)，功能进度见 [FEATURE.md](./FEATURE.md)。
+> 各连接类型的长期说明（配置、层级、界面操作、安全与测试）按类型拆分到 [docs/data-sources/](./docs/data-sources/)，当前已建立 [阿里云 OSS](./docs/data-sources/aliyun-oss.md) 与 [ClickHouse](./docs/data-sources/clickhouse.md)；后续新增类型在同一目录按 `<db_type>.md` 补充。
 
 ## 一、支持状态图例
 
@@ -20,13 +21,13 @@
 | ② 新建连接入口 | `src/components/ConnectionDialog.tsx` 的 `TYPE_META` | 界面上选不到该类型 |
 | ③ 能力注册表 / 菜单 | `src/db/drivers.ts`、`src/db/menuItems.ts` | 菜单文案与操作集不对 |
 
-三者必须都齐才算已支持。当前 MySQL / PostgreSQL / SQL Server / Redis / Elasticsearch / Kafka 的 ①②③ 齐全；Elasticsearch 当前限定只读浏览与查询，SQL Server 与 Kafka 的真实性环境 / 集群验收仍待进行。
+三者必须都齐才算已支持。当前 MySQL / PostgreSQL / SQL Server / ClickHouse / Redis / Elasticsearch / Kafka 的 ①②③ 齐全；Elasticsearch 当前限定只读浏览与查询，SQL Server 与 Kafka 的真实环境 / 集群验收仍待进行，ClickHouse 已在 26.8 上完成真实环境联调。
 
 ---
 
 ## 二、总览（按大类）
 
-按 `src/db/drivers.ts` 的 `DRIVER_LIST` 实际计数：**37 种、8 大类**（不含未知类型兜底；RabbitMQ / RocketMQ / Pulsar 未注册）。Kafka 代码已完成并通过编译检查，仍单独计入「待集群验收」列，避免将编译通过误视为真实集群验收通过。
+按 `src/db/drivers.ts` 的 `DRIVER_LIST` 实际计数：**38 种、9 大类**（不含未知类型兜底；RabbitMQ / RocketMQ / Pulsar 未注册）。Kafka 代码已完成并通过编译检查，仍单独计入「待集群验收」列，避免将编译通过误视为真实集群验收通过。
 另登记 6 种国产 / 信创数据库：达梦 DM、人大金仓 Kingbase、南大通用 GBase、神舟通用 Oscar（信创四大）以及 PolarDB、openGauss —— 均为仅注册，详见 [3.11](#311-国产--信创数据库暂无后端连接器)。
 
 | 大类 `kind` | 已支持 | 协议兼容（未验证） | 已注册待实现 | 实现中 / 待验收 | 小计 |
@@ -39,7 +40,8 @@
 | `ts` 时序 | 0 | 1 | 3 | 0 | 4 |
 | `graph` 图 | 0 | 0 | 2 | 0 | 2 |
 | `messaging` 消息流 / 消息队列 | 0 | 0 | 0 | 1 | 1 |
-| **合计** | **5** | **10** | **21** | **1** | **37** |
+| `storage` 对象存储 | 1 | 0 | 0 | 0 | 1 |
+| **合计** | **6** | **10** | **21** | **1** | **38** |
 
 ---
 
@@ -72,7 +74,7 @@
 
 | 类型 | 标签 | 默认端口 | 后端 | 入口 | 菜单 | 状态 | 说明 |
 |---|---|---|---|---|---|---|---|
-| `clickhouse` | ClickHouse | 8123 | — | — | ✅ | 🔵 | HTTP 接口，非 MySQL 线协议端口，`caps.partition / mv` 待落地 |
+| `clickhouse` | ClickHouse | 8123 | ✅ | ✅ | ✅ | ✅ | HTTP 接口（HTTPS 常用 8443，原生 TCP 9000 不支持）；`system.databases` / `system.tables` / `system.columns`，建库与 Engine + ORDER BY 建表设计器已实现；已在 26.8 真实环境完成连接、对象树、查询与建表写入冒烟 |
 | `doris` | Doris | 9030 | — | — | ✅ | 🔵 | MySQL 线协议 9030，未适配元数据方言 |
 | `starrocks` | StarRocks | 9030 | — | — | ✅ | 🔵 | 同上 |
 | `hive` | Hive | 10000 | — | — | ✅ | 🔵 | 只读定位（`caps.write: false`） |
@@ -170,6 +172,16 @@ Kafka 本版本已实现功能（前后端编译检查通过，真实集群验�
 - 未列入本节的常见国产产品（TDSQL、GaussDB、崖山 YashanDB、AnalyticDB、巨杉 SequoiaDB、浪潮 KaiwuDB、瀚高 HighGo、海量 Vastbase、中兴 GoldenDB、万里开源 GreatSQL、腾讯 Tendis 等）暂未登记；补录时属于「大类已存在、菜单零改动」，成本见 [第六节](#六把一种类型从-推到-要做的事)。
 
 把其中任意一种推到 ✅ 的最小成本路径：**后端优先复用上游协议驱动**（`polardb` → `mysql.rs`，`kingbase` / `opengauss` → `pg.rs`），在 `db/mod.rs` 分发并在 `ConnectionDialog.tsx` 的 `TYPE_META` 开放创建入口，最后验证系统表 / `information_schema` 方言差异。
+
+---
+
+### 3.12 `storage` — 对象存储（第九大类）
+
+| 类型 | 标签 | 默认端口 | 后端 | 入口 | 菜单 | 状态 | 说明 |
+|---|---|---|---|---|---|---|---|
+| `aliyun_oss` | 阿里云 OSS | 443 | ✅ | ✅ | ✅ | ✅ | Endpoint + AK/Secret + 可选 STS；连接 → Bucket；对象在独立工作区浏览，支持前缀分页、名称 / 时间正倒序、上传下载删除与临时下载地址；不执行 SQL |
+
+详细说明（配置字段、权限要求、交互、排序限制、测试清单）见 [docs/data-sources/aliyun-oss.md](./docs/data-sources/aliyun-oss.md)。
 
 ---
 

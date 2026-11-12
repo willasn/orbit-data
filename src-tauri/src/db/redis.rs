@@ -15,7 +15,13 @@ fn url(c: &Connection) -> Result<String, String> {
     } else {
         format!(":{}@", urlencoding::encode(&c.password))
     };
-    Ok(format!("redis://{}{}:{}/{}", auth, c.host, c.port, db))
+    // TLS：启用时使用 rediss://，跳过校验通过 #insecure 片段声明
+    let scheme = if c.tls == Some(true) { "rediss" } else { "redis" };
+    let mut url = format!("{}://{}{}:{}/{}", scheme, auth, c.host, c.port, db);
+    if c.tls == Some(true) && c.tls_skip_verify {
+        url.push_str("#insecure");
+    }
+    Ok(url)
 }
 
 async fn get_conn(c: &Connection) -> Result<redis::aio::MultiplexedConnection, String> {

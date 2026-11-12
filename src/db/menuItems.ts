@@ -128,6 +128,13 @@ function limitSql(conn: Connection, n: number) {
     : { top: "", tail: `\nLIMIT ${n}` };
 }
 
+/** 已落地建表设计窗口的方言（其余类型只保留新建查询入口） */
+function canCreateSqlObject(driver: DriverMeta) {
+  return driver.createDialect === "mysql" ||
+    driver.createDialect === "postgres" ||
+    driver.createDialect === "clickhouse";
+}
+
 /** 建库 DDL（按方言） */
 export function createDbSql(c: { conn: Connection }, db: string): string {
   const q = ident(c, db);
@@ -276,6 +283,8 @@ function ddlSql(c: TableCtx): string | null {
 const CONNECTION_ITEMS: Items<ConnCtx> = [
   { id: "conn.messaging", label: "打开消息工作区", when: (c) => c.driver.caps.messaging,
     run: (c) => st().openMessaging(c.conn.id) },
+  { id: "conn.storage", label: "打开对象存储工作区", when: (c) => c.driver.caps.storage,
+    run: (c) => st().openStorage(c.conn.id) },
   {
     id: "conn.newQuery",
     label: "新建查询",
@@ -304,7 +313,7 @@ const CONNECTION_ITEMS: Items<ConnCtx> = [
     label: (c) => `新建${c.driver.dbLabel}…`,
     hint: "CREATE DATABASE",
     when: (c) => c.driver.caps.sql && c.driver.caps.databases && c.driver.caps.write &&
-      (c.driver.createDialect === "mysql" || c.driver.createDialect === "postgres"),
+      canCreateSqlObject(c.driver),
     run: runCreateDb,
   },
   { id: "conn.refresh", label: "刷新元数据", run: (c) => refreshConn(c.conn.id) },
@@ -360,7 +369,13 @@ const CONNECTION_ITEMS: Items<ConnCtx> = [
     label: (c) => (c.driver.caps.localFile ? "复制文件路径" : "复制地址（不含密码）"),
     run: (c) =>
       copyText(
-        c.driver.caps.localFile ? c.conn.database : c.driver.caps.messaging ? (c.conn.kafka?.bootstrap_servers ?? []).join(", ") : `${c.conn.host}:${c.conn.port}`,
+        c.driver.caps.localFile
+          ? c.conn.database
+          : c.driver.caps.messaging
+          ? (c.conn.kafka?.bootstrap_servers ?? []).join(", ")
+          : c.driver.caps.storage
+          ? `${c.conn.oss?.scheme ?? "https"}://${c.conn.host}${c.conn.database ? `（默认 Bucket: ${c.conn.database}）` : ""}`
+          : `${c.conn.host}:${c.conn.port}`,
         "已复制（不含密码）"
       ),
   },
@@ -374,6 +389,8 @@ const CONNECTION_ITEMS: Items<ConnCtx> = [
           ? `${c.driver.label} 连接「${c.conn.name}」,文件: ${c.conn.database}`
           : c.driver.caps.messaging
           ? `${c.driver.label} 连接「${c.conn.name}」,Bootstrap Servers ${(c.conn.kafka?.bootstrap_servers ?? []).join(", ")}`
+          : c.driver.caps.storage
+          ? `${c.driver.label} 连接「${c.conn.name}」,Endpoint ${c.conn.host}${c.conn.database ? `,默认 Bucket ${c.conn.database}` : ""}`
           : `${c.driver.label} 连接「${c.conn.name}」,地址 ${c.conn.host}:${c.conn.port}${c.conn.database ? `,默认库 ${c.conn.database}` : ""}`,
         "已复制 AI 上下文"
       ),
@@ -436,7 +453,7 @@ const SQL_DB_ITEMS: Items<DbCtx> = [
     label: (c) => `新建${c.driver.tableLabel}…`,
     hint: "打开表设计窗口",
     when: (c) => c.driver.caps.sql && c.driver.caps.tables && c.driver.caps.write &&
-      (c.driver.createDialect === "mysql" || c.driver.createDialect === "postgres"),
+      canCreateSqlObject(c.driver),
     run: (c) => st().openCreate({ connId: c.conn.id, kind: "table", database: c.database }),
   },
   { sep: true },
@@ -587,6 +604,18 @@ const DB_ITEMS: Record<string, Items<DbCtx>> = {
     { id: "db.subgraph", label: "子图可视化", when: (c) => c.driver.caps.subgraph, planned: true },
     { sep: true },
     { id: "db.drop", label: (c) => `删除${c.driver.dbLabel}`, when: (c) => c.driver.caps.write, danger: true, planned: true },
+  ],
+  storage: [
+    {
+      id: "db.open",
+      label: "打开对象存储工作区",
+      hint: "浏览对象 / 上传 / 下载 / 临时链接",
+      when: (c) => c.driver.caps.storage,
+      run: (c) => st().openStorage(c.conn.id, c.database),
+    },
+    { id: "db.refresh", label: "刷新 Bucket 列表", run: (c) => refreshConn(c.conn.id) },
+    { sep: true },
+    { id: "db.copyName", label: "复制 Bucket 名", run: (c) => copyText(c.database) },
   ],
 };
 

@@ -44,6 +44,7 @@ export default function LeftPanel() {
     selectTable,
     openDialog,
     openMessaging,
+    openStorage,
   } = useStore();
 
   // 同组聚拢(组内保持配置顺序,未分组排最后)
@@ -143,7 +144,13 @@ export default function LeftPanel() {
                     c.group ? " in-group" : ""
                   }`}
                   onClick={() => toggleConnection(c.id)}
-                  onDoubleClick={driver.caps.messaging ? () => void openMessaging(c.id) : undefined}
+                  onDoubleClick={
+                    driver.caps.messaging
+                      ? () => void openMessaging(c.id)
+                      : driver.caps.storage
+                        ? () => void openStorage(c.id)
+                        : undefined
+                  }
                   onContextMenu={(e) =>
                     openMenu(e, { kind: "connection", conn: c, driver })
                   }
@@ -165,9 +172,11 @@ export default function LeftPanel() {
                     <div className="conn-host">
                       {c.db_type === "mqtt"
                         ? `${c.host}:${c.port}`
-                        : driver.caps.messaging
-                          ? (c.kafka?.bootstrap_servers ?? []).join(", ")
-                          : `${c.host}:${c.port}`}
+                        : driver.caps.storage
+                          ? `${c.oss?.scheme ?? "https"}://${c.host}`
+                          : driver.caps.messaging
+                            ? (c.kafka?.bootstrap_servers ?? []).join(", ")
+                            : `${c.host}:${c.port}`}
                     </div>
                   </div>
                   <button
@@ -188,7 +197,7 @@ export default function LeftPanel() {
                     {loading === "databases" && (
                       <div className="tree-row indent1 tree-loading">
                         <Loader2 size={12} className="spin" />
-                        <span>正在加载{driver.caps.databases ? "数据库" : driver.tableLabel}…</span>
+                        <span>正在加载{driver.caps.databases ? driver.dbLabel : driver.tableLabel}…</span>
                       </div>
                     )}
                     {loading !== "databases" && tree?.errorLevel === "databases" && (
@@ -202,7 +211,11 @@ export default function LeftPanel() {
                     )}
                     {loading !== "databases" && tree?.errorLevel !== "databases" && dbs.length === 0 && (
                       <div className="tree-row indent1 tree-loading">
-                        {driver.caps.messaging ? "双击连接打开消息工作区" : "无数据库"}
+                        {driver.caps.messaging
+                          ? "双击连接打开消息工作区"
+                          : driver.caps.storage
+                            ? "双击连接打开对象存储工作区"
+                            : "无数据库"}
                       </div>
                     )}
 
@@ -219,7 +232,14 @@ export default function LeftPanel() {
                         <div key={db}>
                           {driver.caps.databases && <div
                             className={`tree-row indent1${dbOpen ? " open" : ""}`}
-                            onClick={() => selectDatabase(c.id, db)}
+                            onClick={() => {
+                              selectDatabase(c.id, db);
+                              // 对象存储：已打开工作区时，选中 Bucket 即同步，避免展示上一个 Bucket 的内容
+                              const synced = useStore.getState().tabs
+                                .some((t) => t.kind === "storage" && t.connId === c.id);
+                              if (driver.caps.storage && synced) void openStorage(c.id, db);
+                            }}
+                            onDoubleClick={driver.caps.storage ? () => void openStorage(c.id, db) : undefined}
                             onContextMenu={(e) =>
                               openMenu(e, {
                                 kind: "database",
@@ -265,6 +285,11 @@ export default function LeftPanel() {
                                   <div className={`tree-row indent${driver.caps.databases ? 2 : 1} tree-more`} onClick={() => void openMessaging(c.id)}>
                                     <Radio size={12} />
                                     <span>打开消息工作区</span>
+                                  </div>
+                                ) : driver.caps.storage ? (
+                                  <div className={`tree-row indent${driver.caps.databases ? 2 : 1} tree-more`} onClick={() => void openStorage(c.id, db)}>
+                                    <Radio size={12} />
+                                    <span>打开对象存储工作区</span>
                                   </div>
                                 ) : (
                                   <div className="tree-row indent2 tree-loading">无对象</div>

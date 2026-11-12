@@ -1,5 +1,7 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type {
+  AgentStepInput,
+  AgentStepResult,
   AppConfig,
   ChatMessage,
   ColumnInfo,
@@ -9,7 +11,10 @@ import type {
   MqttPage,
   QueryResult,
   RedisKeyView,
+  RowUpdate,
   SessionInfo,
+  OssRequest,
+  OssTransferRequest,
   TableInfo,
   UpdateInfo,
 } from "./types";
@@ -37,6 +42,10 @@ export const api = {
   connectionStatus: () => invoke<Record<string, SessionInfo>>("connection_status"),
   kafkaRequest: <T = unknown>(connId: string, request: KafkaRequest) =>
     invoke<T>("kafka_request", { connId, request }),
+  ossRequest: <T = unknown>(connId: string, request: OssRequest) =>
+    invoke<T>("oss_request", { connId, request }),
+  ossTransfer: <T = unknown>(connId: string, request: OssTransferRequest) =>
+    invoke<T>("oss_transfer", { connId, request }),
   mqttSubscribe: (connId: string, topic: string, qos: number) =>
     invoke<void>("mqtt_subscribe", { connId, topic, qos }),
   mqttUnsubscribe: (connId: string, topic: string) =>
@@ -60,6 +69,9 @@ export const api = {
   /** ES 的 database 是目标索引，sql 承载 JSON DSL 或 METHOD /path + JSON。 */
   runQuery: (conn: Connection, database: string, sql: string, limit = 500) =>
     invoke<QueryResult>("run_query", { conn, database, sql, limit }),
+  /** 按主键批量提交结果集修改，返回影响行数 */
+  updateRows: (conn: Connection, database: string, table: string, rows: RowUpdate[]) =>
+    invoke<number>("update_rows", { conn, database, table, rows }),
   redisCommand: (conn: Connection, args: string[]) =>
     invoke<string>("redis_command", { conn, args }),
   redisKeyView: (conn: Connection, key: string) =>
@@ -78,6 +90,10 @@ export const api = {
 
   /** 中断指定请求的流式回答；已生成内容保留 */
   aiCancel: (requestId: string) => invoke<void>("ai_cancel", { requestId }),
+
+  /** Agent 单步决策：返回下一步命令或结束结论（不在后端执行命令） */
+  aiAgentStep: (modelId: string, input: AgentStepInput) =>
+    invoke<AgentStepResult>("ai_agent_step", { modelId, input }),
 
   syncInit: () => invoke<string>("sync_init"),
   syncCommit: (message: string) => invoke<string>("sync_commit", { message }),

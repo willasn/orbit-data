@@ -26,6 +26,19 @@ pub async fn connect(c: &Connection, database: &str) -> Result<sqlx::mysql::MySq
         url.push('/');
         url.push_str(&enc(&db));
     }
+    // TLS：显式开启时要求加密；跳过校验用 REQUIRED（不校验证书 / 主机名），
+    // 严格校验用 VERIFY_IDENTITY（支持证书 SAN 中的 IP 地址）
+    let ssl_mode = match c.tls {
+        Some(true) if c.tls_skip_verify => Some("REQUIRED"),
+        Some(true) => Some("VERIFY_IDENTITY"),
+        Some(false) => Some("DISABLED"),
+        None => None,
+    };
+    if let Some(mode) = ssl_mode {
+        url.push_str(if url.contains('?') { "&" } else { "?" });
+        url.push_str("ssl-mode=");
+        url.push_str(mode);
+    }
     MySqlPoolOptions::new()
         .max_connections(4)
         .acquire_timeout(std::time::Duration::from_secs(10))
@@ -206,4 +219,32 @@ pub async fn query(
         rows: out,
         duration_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+/// 按主键批量提交结果集修改：同一事务内逐行 UPDATE，失败整体回滚
+pub async fn update_rows(
+    c: &Connection,
+    database: &str,
+    table: &str,
+    rows: &[super::RowUpdate],
+) -> Result<usize, String> {
+    let db = if database.is_empty() {
+        c.database.clone()
+    } else {
+        database.to_string()
+    };
+    let target = super::qualified_name(super::Quote::Backtick, &db, table);
+    let pool = connect(c, database).await?;
+    let mut tx = pool.begin().await.map_err(|e| format!("开启事务失败: {e}"))?;
+    let mut affected = 0usize;
+    for row in rows {
+        let sql = super::update_statement("UPDATE", &target, "SET", row, super::Quote::Backtick, true)?;
+        let result = sqlx::query(&sql)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("更新失败: {e}"))?;
+        affected += result.rows_affected() as usize;
+    }
+    tx.commit().await.map_err(|e| format!("提交事务失败: {e}"))?;
+    Ok(affected)
 }

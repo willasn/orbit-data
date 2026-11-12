@@ -3,5 +3,9 @@
   "identifier": "default",
   "description": "OrbitData 默认权限",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "dialog:allow-save"
+  ]
 }

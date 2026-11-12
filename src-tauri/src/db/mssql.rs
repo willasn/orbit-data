@@ -3,7 +3,7 @@
 /// sqlx 自 0.7 起移除 mssql 驱动，SQL Server 走独立连接器，接口与 mysql.rs / pg.rs 保持一致。
 /// 层级映射见 CONTEXT_MENU.md 第三节：库级 = database，表级 = schema.table（dbo 省略前缀），列级 = column。
 use std::time::{Duration, Instant};
-use tiberius::{AuthMethod, Client, ColumnData, Config};
+use tiberius::{AuthMethod, Client, ColumnData, Config, EncryptionLevel};
 use tokio::net::TcpStream;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 
@@ -32,8 +32,21 @@ pub async fn connect(c: &Connection, database: &str) -> Result<SqlClient, String
         c.username.as_str(),
         c.password.as_str(),
     ));
-    // 面向内网与自签证书环境：默认加密等级保留 Required，但不校验证书链
-    config.trust_cert();
+    // TLS：显式关闭时不加密；开启或未设置时保持加密。
+    // 未设置 / 勾选跳过校验时接受自签与 IP 证书，否则校验证书链与主机名。
+    match c.tls {
+        Some(false) => config.encryption(EncryptionLevel::NotSupported),
+        Some(true) => {
+            config.encryption(EncryptionLevel::Required);
+            if c.tls_skip_verify {
+                config.trust_cert();
+            }
+        }
+        None => {
+            config.encryption(EncryptionLevel::Required);
+            config.trust_cert();
+        }
+    }
     let addr = config.get_addr();
     let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(&addr))
         .await
@@ -250,4 +263,57 @@ pub async fn query(
         rows: out,
         duration_ms: start.elapsed().as_millis() as u64,
     })
+}
+
+/// 简单执行一条不取结果集的语句
+async fn exec(client: &mut SqlClient, sql: &str) -> Result<u64, String> {
+    client
+        .simple_query(sql)
+        .await
+        .map_err(|e| format!("更新失败: {e}"))?
+        .into_results()
+        .await
+        .map(|sets| {
+            sets.iter()
+                .flat_map(|rows| rows.iter())
+                .count() as u64
+        })
+        .map_err(|e| format!("更新失败: {e}"))
+}
+
+/// 按主键批量提交结果集修改：显式事务内逐行 UPDATE，失败整体回滚
+pub async fn update_rows(
+    c: &Connection,
+    database: &str,
+    table: &str,
+    rows: &[super::RowUpdate],
+) -> Result<usize, String> {
+    let target = super::qualified_name(super::Quote::Bracket, "", table);
+    let mut client = connect(c, database).await?;
+    exec(&mut client, "BEGIN TRANSACTION").await?;
+    let mut affected = 0usize;
+    for row in rows {
+        let sql = match super::update_statement("UPDATE", &target, "SET", row, super::Quote::Bracket, false) {
+            Ok(sql) => sql,
+            Err(e) => {
+                let _ = exec(&mut client, "ROLLBACK TRANSACTION").await;
+                return Err(e);
+            }
+        };
+        let outcome: Result<(), String> = match client.simple_query(&sql).await {
+            Ok(stream) => stream
+                .into_results()
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("更新失败: {e}")),
+            Err(e) => Err(format!("更新失败: {e}")),
+        };
+        if let Err(e) = outcome {
+            let _ = exec(&mut client, "ROLLBACK TRANSACTION").await;
+            return Err(e);
+        }
+        affected += 1;
+    }
+    exec(&mut client, "COMMIT TRANSACTION").await?;
+    Ok(affected)
 }

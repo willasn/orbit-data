@@ -1,11 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { Send, Square, Copy, Play, Sparkles, Bot, History, Plus, Trash2, Check, Pin, PinOff } from "lucide-react";
+import {
+  Send, Square, Copy, Play, Sparkles, Bot, History, Plus, Trash2, Check, Pin, PinOff,
+  Loader2, CircleCheck, CircleX, CircleAlert, SkipForward, ExternalLink, ChevronRight,
+} from "lucide-react";
 import { getActiveSession, useStore } from "../store";
 import { driverOf } from "../db/drivers";
+import type { ChatMessage, QueryResult, Tab } from "../types";
 import DataGrid from "./DataGrid";
 import Chart from "./Chart";
 import KafkaWorkspace from "./KafkaWorkspace";
 import MqttWorkspace from "./MqttWorkspace";
+import StorageWorkspace from "./StorageWorkspace";
 
 const SUGGESTIONS = [
   { icon: "📝", label: "生成查询 SQL", prompt: "帮我查询当前数据库中所有表的行数,并按行数倒序排列" },
@@ -134,11 +139,13 @@ export default function MainArea() {
           {activeTab?.kind === "chat" ? (
             <ChatView key={activeTab.sessionId} sessionId={activeTab.sessionId} />
           ) : activeTab?.kind === "result" ? (
-            <ResultPanel result={activeTab.result} />
+            <ResultPanel tab={activeTab} />
           ) : activeTab?.kind === "messaging" ? (
             config?.connections.find((c) => c.id === activeTab.connId)?.db_type === "mqtt"
               ? <MqttWorkspace key={activeTab.id} connId={activeTab.connId} />
               : <KafkaWorkspace key={activeTab.id} connId={activeTab.connId} initialTopic={activeTab.topic} />
+          ) : activeTab?.kind === "storage" ? (
+            <StorageWorkspace key={activeTab.id} connId={activeTab.connId} initialBucket={activeTab.bucket} />
           ) : (
             <div className="empty-hint center">暂无打开的标签页</div>
           )}
@@ -161,8 +168,9 @@ export default function MainArea() {
   );
 }
 
-function ResultPanel({ result }: { result: import("../types").QueryResult }) {
+function ResultPanel({ tab }: { tab: Extract<Tab, { kind: "result" }> }) {
   const { resultView, setResultView } = useStore();
+  const { result } = tab;
   return (
     <div className="result-panel">
       <div className="result-subtabs">
@@ -174,14 +182,14 @@ function ResultPanel({ result }: { result: import("../types").QueryResult }) {
         </button>
       </div>
       <div className="result-body">
-        {resultView === "table" ? <DataGrid result={result} /> : <Chart result={result} />}
+        {resultView === "table" ? <DataGrid result={result} tab={tab} /> : <Chart result={result} />}
       </div>
     </div>
   );
 }
 
 function ChatView({ sessionId }: { sessionId: string }) {
-  const { sendChat, stopChat, editorSql, setEditorSql, runSql, config, activeConnId, dbTree, selectChatContext, selectChatModel } = useStore();
+  const { sendChat, stopChat, editorSql, setEditorSql, runSql, config, activeConnId, dbTree, selectChatContext, selectChatModel, resumeAgent } = useStore();
   const session = getActiveSession(useStore());
   const [input, setInput] = useState("");
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
@@ -219,7 +227,7 @@ function ChatView({ sessionId }: { sessionId: string }) {
               <Sparkles size={16} /> AI 对话
             </div>
             <h2>用对话操作你的数据</h2>
-            <p>描述你想要什么,AI 会生成 SQL 并可直接运行。选择左侧连接后,回答会针对当前数据库。</p>
+            <p>AI 会自己执行只读查询、查看结果并继续下一步,直到完成任务。写入、修改、删除等操作会先停下来等你确认。</p>
             <div className="suggestion-grid">
               {SUGGESTIONS.map((s) => (
                 <button key={s.label} className="suggestion-card" onClick={() => setInput(s.prompt)}>
@@ -231,20 +239,40 @@ function ChatView({ sessionId }: { sessionId: string }) {
           </div>
         ) : (
           session.messages.map((m, i) => (
-            <div key={i} className={`msg ${m.role}`}>
+            <div key={i} className={`msg ${m.role}${m.command ? " agent" : ""}`}>
               {m.role === "assistant" && (
                 <div className="msg-avatar">
                   <Sparkles size={13} />
                 </div>
               )}
               <div className="msg-body">
-                <div className={m.role === "user" ? "msg-user-bubble" : "msg-assistant-bubble"}>
-                  {m.role === "user" ? m.content : m.content
-                    ? <MarkdownLite text={m.content} onRunSql={(sql) => runSql(sql)} />
-                    : <span className="msg-thinking">{m.stopped ? "已中断,未收到内容" : "正在思考…"}</span>}
-                </div>
+                {m.role === "user" ? (
+                  <div className="msg-user-bubble">{m.content}</div>
+                ) : m.command ? (
+                  <AgentStepCard msg={m} sessionId={sessionId} index={i} />
+                ) : (
+                  <div className={`msg-assistant-bubble${m.status === "error" ? " error" : ""}`}>
+                    {m.content ? (
+                      m.status === "thinking"
+                        ? <span className="msg-thinking"><Loader2 className="spin" size={12} /> {m.content}</span>
+                        : <MarkdownLite text={m.content} onRunSql={(sql) => runSql(sql)} />
+                    ) : (
+                      <span className="msg-thinking">
+                        <Loader2 className="spin" size={12} />
+                        {m.status === "stopped" ? "已停止" : "正在思考…"}
+                      </span>
+                    )}
+                  </div>
+                )}
                 {m.role === "assistant" && m.stopped && (
                   <span className="msg-stopped">已中断</span>
+                )}
+                {m.role === "assistant" && m.canContinue && (
+                  <div className="agent-step-actions">
+                    <button className="btn primary" onClick={() => resumeAgent(sessionId)}>
+                      <Play size={11} /> 继续执行
+                    </button>
+                  </div>
                 )}
                 {m.role === "user" && (
                   <button className="msg-copy" aria-label="复制此问题" title="复制此问题"
@@ -316,7 +344,7 @@ function ChatView({ sessionId }: { sessionId: string }) {
                 doSend();
               }
             }}
-            placeholder="请输入你的问题,或描述你想要的数据…(Enter 发送,Shift+Enter 换行)"
+            placeholder="描述你的目标,AI 会自动查询、查看结果并继续执行…(Enter 发送,Shift+Enter 换行)"
             rows={2}
           />
           <button
@@ -330,6 +358,146 @@ function ChatView({ sessionId }: { sessionId: string }) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Agent 执行步骤：思考 + 命令 + 输出 + 确认按钮，全部内联在同一条消息流里 */
+function AgentStepCard({ msg, sessionId, index }: { msg: ChatMessage; sessionId: string; index: number }) {
+  const approveAgentStep = useStore((s) => s.approveAgentStep);
+  const skipAgentStep = useStore((s) => s.skipAgentStep);
+  const resumeAgent = useStore((s) => s.resumeAgent);
+  const openResult = useStore((s) => s.openResult);
+  const [copied, setCopied] = useState(false);
+  const status = msg.status ?? "done";
+  const kindLabel = msg.commandKind === "redis" ? "Redis" : msg.commandKind === "elasticsearch" ? "Elasticsearch" : "SQL";
+  const statusText: Record<string, string> = {
+    thinking: "思考中",
+    pending: "等待确认",
+    running: "执行中",
+    done: "已完成",
+    error: "执行失败",
+    skipped: "已跳过",
+    stopped: "已暂停",
+  };
+  const icon = status === "running" || status === "thinking"
+    ? <Loader2 className="spin" size={13} />
+    : status === "done" ? <CircleCheck size={13} />
+      : status === "error" ? <CircleX size={13} />
+        : status === "skipped" ? <SkipForward size={13} />
+          : <CircleAlert size={13} />;
+
+  return (
+    <div className={`agent-step ${status}${msg.danger ? " danger" : ""}`}>
+      <div className="agent-step-head">
+        <span className="agent-step-icon">{icon}</span>
+        <span className="agent-step-label">{kindLabel}</span>
+        <span className="agent-step-status">{statusText[status] ?? status}</span>
+        {msg.outputMeta && status !== "pending" && <span className="agent-step-meta">{msg.outputMeta}</span>}
+      </div>
+
+      {msg.content && <div className="agent-thought">{msg.content}</div>}
+
+      <div className="agent-command">
+        <div className="agent-command-head">
+          <span>{kindLabel}</span>
+          <button
+            onClick={() => {
+              if (!msg.command) return;
+              void navigator.clipboard.writeText(msg.command).then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+              });
+            }}
+          >
+            {copied ? <Check size={11} /> : <Copy size={11} />}
+            {copied ? "已复制" : "复制"}
+          </button>
+        </div>
+        <pre><code>{msg.command}</code></pre>
+      </div>
+
+      {status === "pending" && (
+        <div className="agent-confirm">
+          <div className="agent-confirm-text">
+            <CircleAlert size={13} />
+            <span>
+              {msg.danger ? "高风险操作：" : "需要确认："}
+              {msg.authReason || "该操作会修改数据或结构"}
+            </span>
+          </div>
+          <div className="agent-actions">
+            <button className={`btn primary${msg.danger ? " danger" : ""}`}
+              onClick={() => void approveAgentStep(sessionId, index)}>
+              <Play size={11} /> 执行
+            </button>
+            <button className="btn" onClick={() => skipAgentStep(sessionId, index)}>
+              <SkipForward size={11} /> 跳过
+            </button>
+          </div>
+        </div>
+      )}
+
+      {status === "running" && (
+        <div className="agent-hint"><Loader2 className="spin" size={11} /> 正在执行…</div>
+      )}
+      {status === "skipped" && <div className="agent-hint">已跳过这条命令，让 AI 换一种方式继续。</div>}
+
+      {msg.output && (status === "done" || status === "error" || status === "stopped") && (
+        <details className="agent-output" open={status === "error"}>
+          <summary>
+            <ChevronRight size={11} />
+            {status === "error" ? "执行失败" : "查看输出"}
+            {msg.outputMeta && status !== "error" ? ` · ${msg.outputMeta}` : ""}
+          </summary>
+          {msg.result && status === "done" && msg.result.columns.length > 0
+            ? <AgentResultPreview result={msg.result} />
+            : <pre>{msg.output}</pre>}
+        </details>
+      )}
+
+      {(msg.result || msg.canContinue) && (
+        <div className="agent-step-actions">
+          {msg.result && (
+            <button className="btn" onClick={() => openResult(msg.result!, "AI 查询结果")}>
+              <ExternalLink size={11} /> 在结果页查看
+            </button>
+          )}
+          {msg.canContinue && (
+            <button className="btn primary" onClick={() => resumeAgent(sessionId)}>
+              <Play size={11} /> 继续执行
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 结果页之外的内联结果预览：最多 8 行，保持整页可读 */
+function AgentResultPreview({ result }: { result: QueryResult }) {
+  const rows = result.rows.slice(0, 8);
+  return (
+    <div className="agent-table-wrap">
+      <table className="agent-table">
+        <thead>
+          <tr>{result.columns.map((col, i) => <th key={i}>{col}</th>)}</tr>
+        </thead>
+        <tbody>
+          {rows.map((row, r) => (
+            <tr key={r}>
+              {row.map((cell, c) => (
+                <td key={c} title={cell === null ? "NULL" : String(cell)}>
+                  {cell === null ? <span className="agent-null">NULL</span> : String(cell)}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {result.row_count > rows.length && (
+        <div className="agent-table-more">仅展示前 {rows.length} 行，共 {result.row_count} 行</div>
+      )}
     </div>
   );
 }

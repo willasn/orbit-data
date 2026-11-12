@@ -6,7 +6,14 @@ use std::time::{Duration, Instant};
 
 fn base_url(c: &Connection) -> Result<Url, String> {
     let host = c.host.trim();
-    let address = if host.contains("://") { host.to_owned() } else { format!("http://{host}") };
+    // 未显式写协议时：TLS 关闭用 http，其余按 https（沿用 ES 8.x 默认开启 HTTP TLS 的行为）
+    let address = if host.contains("://") {
+        host.to_owned()
+    } else if c.tls == Some(false) {
+        format!("http://{host}")
+    } else {
+        format!("https://{host}")
+    };
     let mut url = Url::parse(&address).map_err(|_| "ES 主机地址无效".to_string())?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
         || !url.username().is_empty() || url.password().is_some()
@@ -28,6 +35,8 @@ async fn request(c: &Connection, method: Method, path: &str, body: Option<Value>
         return Err("不允许请求其他主机".into());
     }
     let client = Client::builder().timeout(Duration::from_secs(30))
+        // 自签证书或证书未包含当前访问 IP/域名时，可通过连接配置跳过校验
+        .danger_accept_invalid_certs(c.tls_skip_verify)
         .redirect(reqwest::redirect::Policy::none()).build()
         .map_err(|_| "无法创建 ES HTTP 客户端".to_string())?;
     let mut req = client.request(method, url);
@@ -37,7 +46,7 @@ async fn request(c: &Connection, method: Method, path: &str, body: Option<Value>
     if let Some(body) = body { req = req.json(&body); }
     let response = req.send().await.map_err(|e| {
         if e.is_timeout() { "ES 请求超时".to_string() }
-        else if e.is_connect() { "无法连接 ES，请检查地址、端口及 HTTPS 证书".to_string() }
+        else if e.is_connect() { "无法连接 ES，请检查地址、端口，以及协议是否为 https（自签证书可勾选「跳过 HTTPS 证书校验」）".to_string() }
         else { "ES HTTP 请求失败".to_string() }
     })?;
     let status = response.status();
