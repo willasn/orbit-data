@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { api } from "./api";
 import { driverOf } from "./db/drivers";
 import { resolveEditSource } from "./db/resultEdit";
+import { pushHistory } from "./db/sqlEditorStorage";
 import type {
   AgentStep,
   AppConfig,
@@ -10,6 +11,10 @@ import type {
   ChatSession,
   Connection,
   DbTree,
+  DropZone,
+  PaneLeaf,
+  PaneNode,
+  PaneSplit,
   QueryResult,
   RowUpdate,
   SessionInfo,
@@ -49,7 +54,7 @@ interface AgentRun {
 const agentRuns = new Map<string, AgentRun>();
 
 const PANE_KEY = "orbit-data.pane-widths";
-const DEFAULT_PANES = { leftWidth: 264, rightWidth: 372 };
+const DEFAULT_PANES = { leftWidth: 264 };
 const GROUP_KEY = "orbit-data.group-collapsed";
 const CHAT_KEY = "orbit-data.chat-sessions";
 
@@ -63,9 +68,12 @@ function loadChats(): ChatSession[] {
       s.messages.every((m: unknown) => m !== null && typeof m === "object" &&
         "role" in m && (m.role === "user" || m.role === "assistant") &&
         "content" in m && typeof m.content === "string")
-    ).map((s) => ({
+    ).filter((s) => s.messages.length > 0).map((s) => ({
       ...s,
-      title: s.messages.find((m) => m.role === "user")?.content ?? s.title,
+      // 保留用户重命名后的标题，仅在没有有效标题时回退到首条提问
+      title: s.title && s.title !== "新对话"
+        ? s.title
+        : s.messages.find((m) => m.role === "user")?.content ?? s.title,
       streaming: false,
       messages: s.messages.map((m) => ({
         ...m,
@@ -82,8 +90,9 @@ function loadChats(): ChatSession[] {
 
 function saveChats(sessions: ChatSession[]) {
   try {
-    localStorage.setItem(CHAT_KEY, JSON.stringify(sessions.map((s) => ({
-      id: s.id, title: s.title, modelId: s.modelId, pinned: s.pinned,
+    // 空会话（新建后未提问）不写入历史
+    localStorage.setItem(CHAT_KEY, JSON.stringify(sessions.filter((s) => s.messages.length > 0).map((s) => ({
+      id: s.id, title: s.title, modelId: s.modelId, pinned: s.pinned, context: s.context,
       messages: s.messages
         .filter((m) => (m.role === "user" || m.role === "assistant") && (m.content || m.command))
         .map((m) => ({
@@ -139,6 +148,7 @@ function buildAgentContext(
   if (tree?.selectedTable) parts.push(`当前${driver.tableLabel}：${tree.selectedTable}`);
   if (tree?.selectedColumn) parts.push(`当前字段：${tree.selectedColumn}`);
   if (conn.db_type === "redis") parts.push("命令类型：单条 Redis 命令");
+  else if (driver.queryLanguage === "milvus") parts.push("命令类型：Milvus REST v2 请求，首行为 POST /v2/vectordb/operation，换行后填写 JSON 对象；使用真实 collectionName 和标量 filter，不生成 SQL；展示可执行代码块时使用 milvus 语言标记。");
   else if (driver.caps.mapping) parts.push("命令类型：Elasticsearch 请求");
   else parts.push("命令类型：SQL");
   parts.push("只读查询会直接执行；写入、修改、删除等操作会先请用户确认。");
@@ -166,17 +176,172 @@ function loadGroups(): Record<string, boolean> {
   }
 }
 
-/** 左右栏宽度(拖动分隔条调整,本地记忆) */
-function loadPanes(): { leftWidth: number; rightWidth: number } {
+/** 左栏宽度(拖动分隔条调整,本地记忆) */
+function loadPanes(): { leftWidth: number } {
   try {
     const raw = JSON.parse(localStorage.getItem(PANE_KEY) ?? "{}");
     return {
       leftWidth: typeof raw.leftWidth === "number" ? raw.leftWidth : DEFAULT_PANES.leftWidth,
-      rightWidth: typeof raw.rightWidth === "number" ? raw.rightWidth : DEFAULT_PANES.rightWidth,
     };
   } catch {
     return { ...DEFAULT_PANES };
   }
+}
+
+// ---------------------------------------------------------------------------
+// 中间面板布局树：叶子承载标签页，分栏节点支持左右 / 上下分屏
+// ---------------------------------------------------------------------------
+
+function makeLeaf(id: string, tabIds: string[] = [], activeTabId = ""): PaneLeaf {
+  return { type: "leaf", id, tabIds, activeTabId: activeTabId || tabIds[tabIds.length - 1] || "" };
+}
+
+/** 默认布局：单个会话子面板（SQL / 对话输入共用，查询结果以同级标签页打开） */
+function chatOnlyLayout(chatTabId: string): PaneLeaf {
+  return makeLeaf("pane-chat", [chatTabId], chatTabId);
+}
+
+function collectLeaves(node: PaneNode): PaneLeaf[] {
+  if (node.type === "leaf") return [node];
+  return node.children.flatMap(collectLeaves);
+}
+
+function findLeafById(node: PaneNode, leafId: string): PaneLeaf | null {
+  if (node.type === "leaf") return node.id === leafId ? node : null;
+  for (const child of node.children) {
+    const found = findLeafById(child, leafId);
+    if (found) return found;
+  }
+  return null;
+}
+
+function findLeafByTab(node: PaneNode, tabId: string): PaneLeaf | null {
+  if (node.type === "leaf") return node.tabIds.includes(tabId) ? node : null;
+  for (const child of node.children) {
+    const found = findLeafByTab(child, tabId);
+    if (found) return found;
+  }
+  return null;
+}
+
+function normalizeSizes(sizes: number[]): number[] {
+  const total = sizes.reduce((sum, n) => sum + n, 0) || 1;
+  return sizes.map((n) => n / total);
+}
+
+/** 从布局树中移除标签；叶子被清空时一并移除，分栏只剩一个子节点时折叠 */
+function removeTabFromLayout(node: PaneNode, tabId: string): PaneNode | null {
+  if (node.type === "leaf") {
+    if (!node.tabIds.includes(tabId)) return node;
+    const tabIds = node.tabIds.filter((id) => id !== tabId);
+    if (!tabIds.length) return null;
+    return {
+      ...node,
+      tabIds,
+      activeTabId: node.activeTabId === tabId ? tabIds[tabIds.length - 1] : node.activeTabId,
+    };
+  }
+  const children: PaneNode[] = [];
+  const sizes: number[] = [];
+  node.children.forEach((child, index) => {
+    const next = removeTabFromLayout(child, tabId);
+    if (next) {
+      children.push(next);
+      sizes.push(node.sizes[index] ?? 1);
+    }
+  });
+  if (!children.length) return null;
+  if (children.length === 1) return children[0];
+  return { ...node, children, sizes: normalizeSizes(sizes) };
+}
+
+/** 把标签放到目标叶子的指定落点；落在边缘时把目标叶子一分为二 */
+function insertTabIntoLayout(
+  node: PaneNode,
+  targetLeafId: string,
+  tabId: string,
+  zone: DropZone,
+): PaneNode {
+  if (node.type === "leaf") {
+    if (node.id !== targetLeafId) return node;
+    if (zone === "center") {
+      return {
+        ...node,
+        tabIds: node.tabIds.includes(tabId) ? node.tabIds : [...node.tabIds, tabId],
+        activeTabId: tabId,
+      };
+    }
+    const newLeaf = makeLeaf(nextId("pane"), [tabId], tabId);
+    const horizontal = zone === "left" || zone === "right";
+    const first = zone === "left" || zone === "up";
+    return {
+      type: "split",
+      id: nextId("split"),
+      dir: horizontal ? "row" : "col",
+      sizes: [0.5, 0.5],
+      children: first ? [newLeaf, node] : [node, newLeaf],
+    };
+  }
+  return {
+    ...node,
+    children: node.children.map((child) => insertTabIntoLayout(child, targetLeafId, tabId, zone)),
+  };
+}
+
+/** 激活某个叶子内的标签 */
+function activateTabInLayout(node: PaneNode, tabId: string): PaneNode {
+  if (node.type === "leaf") {
+    return node.tabIds.includes(tabId) ? { ...node, activeTabId: tabId } : node;
+  }
+  return { ...node, children: node.children.map((child) => activateTabInLayout(child, tabId)) };
+}
+
+/** 按标签类型找承载它的叶子（用于会话 / 结果 / 专属工作区） */
+function findLeafOfKinds(node: PaneNode, tabs: Tab[], kinds: Tab["kind"][]): PaneLeaf | null {
+  for (const leaf of collectLeaves(node)) {
+    const hit = leaf.tabIds.some((id) => {
+      const tab = tabs.find((t) => t.id === id);
+      return !!tab && kinds.includes(tab.kind);
+    });
+    if (hit) return leaf;
+  }
+  return null;
+}
+
+function firstTabOf(node: PaneNode): string {
+  const leaf = collectLeaves(node)[0];
+  return leaf?.activeTabId || leaf?.tabIds[0] || "";
+}
+
+function updateSplitSizes(node: PaneNode, splitId: string, sizes: number[]): PaneNode {
+  if (node.type === "leaf") return node;
+  if (node.id === splitId) return { ...node, sizes: normalizeSizes(sizes) };
+  return { ...node, children: node.children.map((child) => updateSplitSizes(child, splitId, sizes)) };
+}
+
+/** 新增标签时的落点：同类型标签优先合并；查询结果与对话同级，作为标签页打开而不是新起一列 */
+function insertTabInPreferred(
+  layout: PaneNode,
+  tabs: Tab[],
+  tab: Tab,
+): { layout: PaneNode; paneId: string } {
+  const sameKind = findLeafOfKinds(layout, tabs, [tab.kind]);
+  if (sameKind) {
+    return {
+      layout: insertTabIntoLayout(layout, sameKind.id, tab.id, "center"),
+      paneId: sameKind.id,
+    };
+  }
+  const leaves = collectLeaves(layout);
+  if (!leaves.length) {
+    const created = makeLeaf(nextId("pane"), [tab.id], tab.id);
+    return { layout: created, paneId: created.id };
+  }
+  const chatLeaf = findLeafOfKinds(layout, tabs, ["chat"]) ?? leaves[0];
+  return {
+    layout: insertTabIntoLayout(layout, chatLeaf.id, tab.id, "center"),
+    paneId: chatLeaf.id,
+  };
 }
 
 /** 应用内输入 / 确认弹窗的参数（macOS 的 WKWebView 不弹 window.prompt，统一走这里） */
@@ -204,9 +369,7 @@ interface Store {
   config: AppConfig | null;
   view: "chat" | "settings";
   showLeft: boolean;
-  showRight: boolean;
   leftWidth: number;
-  rightWidth: number;
   dialogOpen: false | "new" | Connection;
   createTarget: null | { connId: string; kind: "database" | "table" | "key"; database?: string };
   /** 当前打开的输入 / 确认弹窗（同一时刻只有一个） */
@@ -222,16 +385,31 @@ interface Store {
   sessions: ChatSession[];
   tabs: Tab[];
   activeTabId: string;
+  /** 中间面板布局树（多子面板 + 左右 / 上下分屏） */
+  layout: PaneNode;
+  /** 当前聚焦的子面板 */
+  activePaneId: string;
+  /** SQL 编辑器放大弹窗 */
+  sqlExpanded: boolean;
+  /** 输入区模式：Agent 对话 / SQL 命令 */
+  chatInputMode: "agent" | "sql";
 
   editorSql: string;
-  resultView: "table" | "chart";
   toast: string;
 
   init: () => Promise<void>;
   showToast: (msg: string) => void;
   setView: (v: "chat" | "settings") => void;
-  togglePanel: (side: "left" | "right") => void;
-  setPaneWidth: (side: "left" | "right", width: number) => void;
+  togglePanel: (side: "left") => void;
+  setPaneWidth: (side: "left", width: number) => void;
+  setPaneActive: (paneId: string) => void;
+  resizeSplit: (splitId: string, sizes: number[]) => void;
+  /** 拖拽标签到子面板：center 合并，边缘分屏 */
+  moveTab: (tabId: string, targetPaneId: string, zone: DropZone) => void;
+  /** 打开并聚焦 SQL 编辑器标签页（已关闭时重新创建） */
+  openSqlTab: () => void;
+  setSqlExpanded: (open: boolean) => void;
+  setChatInputMode: (mode: "agent" | "sql") => void;
   openDialog: (conn?: Connection) => void;
   closeDialog: () => void;
   openCreate: (target: NonNullable<Store["createTarget"]>) => void;
@@ -242,7 +420,6 @@ interface Store {
   askConfirm: (opts: AskOptions) => Promise<boolean>;
   resolveAsk: (value: string | null) => void;
   setEditorSql: (sql: string) => void;
-  setResultView: (v: "table" | "chart") => void;
 
   saveConnection: (conn: Connection) => Promise<void>;
   removeConnection: (id: string) => Promise<void>;
@@ -267,9 +444,13 @@ interface Store {
   inspectKey: (key: string) => Promise<void>;
 
   newChat: () => void;
+  /** 重命名会话（同步标签页标题） */
+  renameChat: (sessionId: string, title: string) => void;
   clearChat: (sessionId: string) => void;
   toggleChatPin: (sessionId: string) => void;
   deleteChat: (sessionId: string) => void;
+  /** 清空全部历史会话，保留一个空白新对话 */
+  clearAllChats: () => void;
   openMessaging: (connId: string, topic?: string) => Promise<void>;
   /** 打开对象存储工作区（同一连接复用同一个标签页） */
   openStorage: (connId: string, bucket?: string) => Promise<void>;
@@ -518,7 +699,7 @@ async function driveAgentStep(sessionId: string): Promise<void> {
 
   const kind: ChatMessage["commandKind"] = run.conn?.db_type === "redis"
     ? "redis"
-    : run.conn && driverOf(run.conn.db_type).caps.mapping ? "elasticsearch" : "sql";
+    : run.conn ? driverOf(run.conn.db_type).queryLanguage ?? "sql" : "sql";
 
   run.steps += 1;
   if (command === run.lastCommand) run.repeat += 1;
@@ -568,7 +749,6 @@ export const useStore = create<Store>((set, get) => ({
   config: null,
   view: "chat",
   showLeft: true,
-  showRight: true,
   ...loadPanes(),
   dialogOpen: false,
   createTarget: null,
@@ -580,8 +760,11 @@ export const useStore = create<Store>((set, get) => ({
   sessions: [],
   tabs: [],
   activeTabId: "",
+  layout: makeLeaf("pane-chat"),
+  activePaneId: "pane-chat",
+  sqlExpanded: false,
+  chatInputMode: "agent",
   editorSql: "",
-  resultView: "table",
   toast: "",
   toastTimer: null,
 
@@ -599,10 +782,15 @@ export const useStore = create<Store>((set, get) => ({
       const session = history[history.length - 1] ?? {
         id: nextId("chat"), title: "新对话", messages: [], streaming: false,
       };
+      const chatTab: Tab = {
+        id: `tab-${session.id}`, kind: "chat", sessionId: session.id, title: session.title,
+      };
       set({
         sessions: history.length ? history : [session],
-        tabs: [{ id: `tab-${session.id}`, kind: "chat", sessionId: session.id, title: session.title }],
-        activeTabId: `tab-${session.id}`,
+        tabs: [chatTab],
+        activeTabId: chatTab.id,
+        layout: chatOnlyLayout(chatTab.id),
+        activePaneId: "pane-chat",
       });
     }
   },
@@ -614,20 +802,72 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   setView: (view) => set({ view }),
-  togglePanel: (side) =>
-    set(side === "left" ? { showLeft: !get().showLeft } : { showRight: !get().showRight }),
+  togglePanel: () => set({ showLeft: !get().showLeft }),
   setPaneWidth: (side, width) => {
+    if (side !== "left") return;
     const w = Math.round(width);
-    set(side === "left" ? { leftWidth: w } : { rightWidth: w });
+    set({ leftWidth: w });
     try {
-      localStorage.setItem(
-        PANE_KEY,
-        JSON.stringify({ leftWidth: get().leftWidth, rightWidth: get().rightWidth }),
-      );
+      localStorage.setItem(PANE_KEY, JSON.stringify({ leftWidth: w }));
     } catch {
       /* 忽略存储失败 */
     }
   },
+  setPaneActive: (paneId) => {
+    const leaf = findLeafById(get().layout, paneId);
+    if (!leaf) return;
+    set({ activePaneId: paneId, activeTabId: leaf.activeTabId });
+  },
+  resizeSplit: (splitId, sizes) => set({ layout: updateSplitSizes(get().layout, splitId, sizes) }),
+  moveTab: (tabId, targetPaneId, zone) => {
+    const { layout } = get();
+    const source = findLeafByTab(layout, tabId);
+    if (!source) return;
+    if (source.id === targetPaneId) {
+      if (zone === "center") {
+        set({ activePaneId: source.id, activeTabId: tabId, layout: activateTabInLayout(layout, tabId) });
+        return;
+      }
+      // 同一子面板内拖到边缘：保留其余标签后再分屏，单个标签时不拆
+      if (source.tabIds.length <= 1) return;
+    }
+    const without = removeTabFromLayout(layout, tabId);
+    if (!without) return;
+    const nextLayout = insertTabIntoLayout(without, targetPaneId, tabId, zone);
+    const leaf = findLeafByTab(nextLayout, tabId);
+    set({
+      layout: nextLayout,
+      activeTabId: tabId,
+      activePaneId: leaf?.id ?? targetPaneId,
+    });
+  },
+  openSqlTab: () => {
+    const { tabs, layout } = get();
+    const existing = tabs.find((t) => t.kind === "sql");
+    if (existing) {
+      const nextLayout = activateTabInLayout(layout, existing.id);
+      const leaf = findLeafByTab(nextLayout, existing.id);
+      set({
+        layout: nextLayout,
+        activeTabId: existing.id,
+        activePaneId: leaf?.id ?? get().activePaneId,
+      });
+      return;
+    }
+    const sqlTab: Tab = { id: nextId("sql"), kind: "sql", title: "SQL 编辑器" };
+    const leaves = collectLeaves(layout);
+    const target = leaves[leaves.length - 1] ?? makeLeaf(nextId("pane"));
+    const base: PaneNode = leaves.length ? layout : target;
+    const nextLayout = insertTabIntoLayout(base, target.id, sqlTab.id, "center");
+    set({
+      tabs: [...tabs, sqlTab],
+      layout: nextLayout,
+      activeTabId: sqlTab.id,
+      activePaneId: target.id,
+    });
+  },
+  setSqlExpanded: (open) => set({ sqlExpanded: open }),
+  setChatInputMode: (mode) => set({ chatInputMode: mode }),
   openDialog: (conn) => set({ dialogOpen: conn ?? "new" }),
   closeDialog: () => set({ dialogOpen: false }),
   openCreate: (createTarget) => set({ createTarget }),
@@ -654,7 +894,6 @@ export const useStore = create<Store>((set, get) => ({
     ask.resolve(value);
   },
   setEditorSql: (sql) => set({ editorSql: sql }),
-  setResultView: (resultView) => set({ resultView }),
 
   saveConnection: async (conn) => {
     try {
@@ -662,7 +901,7 @@ export const useStore = create<Store>((set, get) => ({
       const prevType = activeConn(get().config, conn.id)?.db_type ?? "";
       const needsReset = (t: string) => driverOf(t).caps.messaging || driverOf(t).caps.storage;
       if (conn.id && (needsReset(conn.db_type) || needsReset(prevType))) {
-        get().tabs.filter((t) => t.kind !== "chat" && t.kind !== "result" && t.connId === conn.id)
+        get().tabs.filter((t) => t.kind !== "chat" && t.kind !== "result" && t.kind !== "sql" && t.connId === conn.id)
           .forEach((t) => get().closeTab(t.id));
         await get().disconnectDb(conn.id);
       }
@@ -677,7 +916,7 @@ export const useStore = create<Store>((set, get) => ({
     try {
       const config = await api.deleteConnection(id);
       connectionEpochs.set(id, (connectionEpochs.get(id) ?? 0) + 1);
-      get().tabs.filter((t) => t.kind !== "chat" && t.kind !== "result" && t.connId === id)
+      get().tabs.filter((t) => t.kind !== "chat" && t.kind !== "result" && t.kind !== "sql" && t.connId === id)
         .forEach((t) => get().closeTab(t.id));
       const dbTree = { ...get().dbTree };
       delete dbTree[id];
@@ -738,7 +977,7 @@ export const useStore = create<Store>((set, get) => ({
     // 等待进行中的握手结束，避免断开后又被握手结果重新建连
     const pending = pendingConnects.get(id);
     if (pending) await pending.catch(() => undefined);
-    get().tabs.filter((t) => t.kind !== "chat" && t.kind !== "result" && t.connId === id)
+    get().tabs.filter((t) => t.kind !== "chat" && t.kind !== "result" && t.kind !== "sql" && t.connId === id)
       .forEach((t) => get().closeTab(t.id));
     const connSessions = { ...get().connSessions };
     delete connSessions[id];
@@ -965,15 +1204,28 @@ export const useStore = create<Store>((set, get) => ({
       // 复用已存在的「查询结果」标签页，避免每次执行都堆一个新标签
       const existing = get().tabs.find((t) => t.kind === "result" && t.title === "查询结果");
       const tabId = existing?.id ?? nextId("result");
-      const nextTab = { id: tabId, kind: "result" as const, title: "查询结果", result };
+      const nextTab: Tab = { id: tabId, kind: "result", title: "查询结果", result };
+      const tabs = existing
+        ? get().tabs.map((t) => (t.id === tabId ? nextTab : t))
+        : [...get().tabs, nextTab];
+      const layout = existing
+        ? activateTabInLayout(get().layout, tabId)
+        : insertTabInPreferred(get().layout, get().tabs, nextTab).layout;
       set({
-        tabs: existing
-          ? get().tabs.map((t) => (t.id === tabId ? nextTab : t))
-          : [...get().tabs, nextTab],
+        tabs,
+        layout,
         activeTabId: tabId,
-        resultView: "table",
+        activePaneId: findLeafByTab(layout, tabId)?.id ?? get().activePaneId,
         // 结果标签页在中栏展示：确保中栏处于查询视图，避免"执行了却看不到结果"
         view: "chat",
+      });
+      // 执行过的 SQL 一并归档到「历史会话」，带上连接 / 库 / 表 / 字段上下文，便于下次直接回带
+      const driver = driverOf(conn.db_type);
+      const tree = dbTree[conn.id];
+      pushHistory(conn.id, conn.name, sql, {
+        database: driver.caps.databases ? tree?.selectedDb || conn.database || "" : "",
+        table: tree?.selectedTable ?? "",
+        column: tree?.selectedColumn ?? "",
       });
       if (conn.db_type !== "redis") {
         void hydrateResultEdit(set, get, tabId, conn, database, sql, result);
@@ -1048,10 +1300,13 @@ export const useStore = create<Store>((set, get) => ({
         }`,
       };
       const tabId = nextId("result");
+      const tab: Tab = { id: tabId, kind: "result", title: key, result };
+      const placed = insertTabInPreferred(get().layout, get().tabs, tab);
       set({
-        tabs: [...get().tabs, { id: tabId, kind: "result", title: key, result }],
+        tabs: [...get().tabs, tab],
+        layout: placed.layout,
         activeTabId: tabId,
-        resultView: "table",
+        activePaneId: placed.paneId,
         view: "chat",
       });
     } catch (e) {
@@ -1067,14 +1322,34 @@ export const useStore = create<Store>((set, get) => ({
       streaming: false,
     };
     const sessions = [...get().sessions, session];
+    const chatTab: Tab = {
+      id: `tab-${session.id}`, kind: "chat", sessionId: session.id, title: session.title,
+    };
+    const { layout, tabs } = get();
+    const leaf = findLeafOfKinds(layout, tabs, ["chat"]) ?? collectLeaves(layout)[0];
+    const nextLayout = leaf
+      ? insertTabIntoLayout(layout, leaf.id, chatTab.id, "center")
+      : makeLeaf(nextId("pane"), [chatTab.id], chatTab.id);
+    const paneId = findLeafByTab(nextLayout, chatTab.id)?.id ?? get().activePaneId;
     set({
       sessions,
-      tabs: [
-        ...get().tabs,
-        { id: `tab-${session.id}`, kind: "chat", sessionId: session.id, title: session.title },
-      ],
-      activeTabId: `tab-${session.id}`,
+      tabs: [...tabs, chatTab],
+      layout: nextLayout,
+      activeTabId: chatTab.id,
+      activePaneId: paneId,
       view: "chat",
+    });
+    saveChats(sessions);
+  },
+
+  renameChat: (sessionId, title) => {
+    const name = title.trim();
+    if (!name || !get().sessions.some((s) => s.id === sessionId)) return;
+    const sessions = get().sessions.map((s) => s.id === sessionId ? { ...s, title: name } : s);
+    set({
+      sessions,
+      tabs: get().tabs.map((t) =>
+        t.kind === "chat" && t.sessionId === sessionId ? { ...t, title: name } : t),
     });
     saveChats(sessions);
   },
@@ -1110,12 +1385,60 @@ export const useStore = create<Store>((set, get) => ({
       agentRuns.delete(sessionId);
     }
     const sessions = get().sessions.filter((s) => s.id !== sessionId);
+    const removed = get().tabs.filter((t) => t.kind === "chat" && t.sessionId === sessionId);
     const tabs = get().tabs.filter((t) => t.kind !== "chat" || t.sessionId !== sessionId);
+    let layout: PaneNode = get().layout;
+    removed.forEach((tab) => {
+      layout = removeTabFromLayout(layout, tab.id) ?? makeLeaf(nextId("pane"));
+    });
     const activeTabId = tabs.some((t) => t.id === get().activeTabId)
-      ? get().activeTabId : tabs[tabs.length - 1]?.id ?? "";
-    set({ sessions, tabs, activeTabId });
+      ? get().activeTabId : firstTabOf(layout);
+    set({
+      sessions,
+      tabs,
+      layout,
+      activeTabId,
+      activePaneId: findLeafByTab(layout, activeTabId)?.id ?? get().activePaneId,
+    });
     saveChats(sessions);
     if (!tabs.length) get().newChat();
+  },
+
+  clearAllChats: () => {
+    const { sessions, tabs, layout } = get();
+    sessions.forEach((session) => {
+      const run = agentRuns.get(session.id);
+      if (run) {
+        run.stopped = true;
+        agentRuns.delete(session.id);
+      }
+    });
+    const session: ChatSession = {
+      id: nextId("chat"),
+      title: "新对话",
+      messages: [],
+      streaming: false,
+    };
+    const chatTab: Tab = {
+      id: `tab-${session.id}`, kind: "chat", sessionId: session.id, title: session.title,
+    };
+    let nextLayout: PaneNode = layout;
+    tabs.filter((t) => t.kind === "chat").forEach((tab) => {
+      nextLayout = removeTabFromLayout(nextLayout, tab.id) ?? makeLeaf(nextId("pane"));
+    });
+    const leaf = collectLeaves(nextLayout)[0];
+    nextLayout = leaf
+      ? insertTabIntoLayout(nextLayout, leaf.id, chatTab.id, "center")
+      : makeLeaf("pane-chat", [chatTab.id], chatTab.id);
+    set({
+      sessions: [session],
+      tabs: [...tabs.filter((t) => t.kind !== "chat"), chatTab],
+      layout: nextLayout,
+      activeTabId: chatTab.id,
+      activePaneId: findLeafByTab(nextLayout, chatTab.id)?.id ?? "pane-chat",
+      view: "chat",
+    });
+    saveChats([session]);
   },
 
   openMessaging: async (connId, topic) => {
@@ -1126,8 +1449,31 @@ export const useStore = create<Store>((set, get) => ({
     const existing = get().tabs.find((t) => t.kind === "messaging" && t.connId === connId && t.topic === topic);
     const id = existing?.id ?? nextId("messaging");
     const label = driverOf(conn.db_type).label;
-    set({ tabs: existing ? get().tabs : [...get().tabs, { id, kind: "messaging", connId, topic,
-      title: topic ? `${label} · ${topic}` : `${label} · ${conn.name}` }], activeTabId: id, activeConnId: connId, view: "chat" });
+    let layout: PaneNode = get().layout;
+    let paneId = existing ? findLeafByTab(layout, id)?.id ?? "" : "";
+    if (!existing) {
+      const tab: Tab = { id, kind: "messaging", connId, topic,
+        title: topic ? `${label} · ${topic}` : `${label} · ${conn.name}` };
+      const leaf = findLeafOfKinds(layout, get().tabs, ["chat", "result"]) ?? collectLeaves(layout)[0];
+      if (leaf) {
+        layout = insertTabIntoLayout(layout, leaf.id, id, "center");
+        paneId = leaf.id;
+      } else {
+        layout = makeLeaf(nextId("pane"), [id], id);
+        paneId = layout.id;
+      }
+      set({ tabs: [...get().tabs, tab], layout, activeTabId: id, activePaneId: paneId,
+        activeConnId: connId, view: "chat" });
+      return;
+    }
+    set({
+      tabs: get().tabs,
+      layout: activateTabInLayout(layout, id),
+      activeTabId: id,
+      activePaneId: paneId || get().activePaneId,
+      activeConnId: connId,
+      view: "chat",
+    });
   },
 
   openStorage: async (connId, bucket) => {
@@ -1139,43 +1485,98 @@ export const useStore = create<Store>((set, get) => ({
     const id = existing?.id ?? nextId("storage");
     const target = bucket ?? (existing?.kind === "storage" ? existing.bucket : undefined) ?? conn.database ?? "";
     const title = `${driverOf(conn.db_type).label} · ${conn.name}`;
+    let layout: PaneNode = get().layout;
+    let paneId = existing ? findLeafByTab(layout, id)?.id ?? "" : "";
+    let tabs = get().tabs;
+    if (existing) {
+      tabs = tabs.map((t) => (t.id === id ? { ...t, bucket: target } : t));
+      layout = activateTabInLayout(layout, id);
+    } else {
+      const tab: Tab = { id, kind: "storage", connId, bucket: target, title };
+      const leaf = findLeafOfKinds(layout, tabs, ["chat", "result"]) ?? collectLeaves(layout)[0];
+      if (leaf) {
+        layout = insertTabIntoLayout(layout, leaf.id, id, "center");
+        paneId = leaf.id;
+      } else {
+        layout = makeLeaf(nextId("pane"), [id], id);
+        paneId = layout.id;
+      }
+      tabs = [...tabs, tab];
+    }
     set({
-      tabs: existing
-        ? get().tabs.map((t) => (t.id === id ? { ...t, bucket: target } : t))
-        : [...get().tabs, { id, kind: "storage", connId, bucket: target, title }],
+      tabs,
+      layout,
       activeTabId: id,
+      activePaneId: paneId || get().activePaneId,
       activeConnId: connId,
       view: "chat",
     });
   },
 
   openChatTab: (sessionId) => {
-    if (!get().sessions.some((s) => s.id === sessionId)) return;
-    const tab = get().tabs.find((t) => t.kind === "chat" && t.sessionId === sessionId);
-    if (tab) {
-      set({ activeTabId: tab.id, view: "chat" });
+    const session = get().sessions.find((s) => s.id === sessionId);
+    if (!session) return;
+    const existing = get().tabs.find((t) => t.kind === "chat" && t.sessionId === sessionId);
+    const { layout, tabs } = get();
+    let nextLayout = layout;
+    let tabId = existing?.id ?? "";
+    if (existing) {
+      nextLayout = activateTabInLayout(layout, existing.id);
     } else {
-      const session = get().sessions.find((s) => s.id === sessionId)!;
-      const id = `tab-${sessionId}`;
-      set({ tabs: [...get().tabs, { id, kind: "chat", sessionId, title: session.title }],
-        activeTabId: id, view: "chat" });
+      tabId = `tab-${sessionId}`;
+      const tab: Tab = { id: tabId, kind: "chat", sessionId, title: session.title };
+      const leaf = findLeafOfKinds(layout, tabs, ["chat"]) ?? collectLeaves(layout)[0];
+      if (leaf) {
+        nextLayout = insertTabIntoLayout(layout, leaf.id, tabId, "center");
+      } else {
+        nextLayout = makeLeaf(nextId("pane"), [tabId], tabId);
+      }
+      set({ tabs: [...tabs, tab] });
+    }
+    const paneId = findLeafByTab(nextLayout, tabId)?.id ?? get().activePaneId;
+    set({ layout: nextLayout, activeTabId: tabId, activePaneId: paneId, view: "chat" });
+
+    // 历史会话回带关联的连接 / 库 / 表
+    const ctx = session.context;
+    if (ctx) {
+      const tree = get().dbTree[ctx.connId];
+      const changed = get().activeConnId !== ctx.connId
+        || (ctx.database && tree?.selectedDb !== ctx.database)
+        || (ctx.table && tree?.selectedTable !== ctx.table);
+      if (changed) {
+        void get().selectChatContext(ctx.connId, ctx.database, ctx.table, ctx.column);
+      }
     }
   },
 
   closeTab: (tabId) => {
-    let { tabs, activeTabId } = get();
-    tabs = tabs.filter((t) => t.id !== tabId);
-    if (activeTabId === tabId) {
-      activeTabId = tabs.length > 0 ? tabs[tabs.length - 1].id : "";
-    }
+    const tabs = get().tabs.filter((t) => t.id !== tabId);
+    const layout = removeTabFromLayout(get().layout, tabId) ?? makeLeaf(nextId("pane"));
+    let activeTabId = get().activeTabId;
+    if (activeTabId === tabId) activeTabId = firstTabOf(layout);
     const nextTab = tabs.find((t) => t.id === activeTabId);
-    set({ tabs, activeTabId, ...(nextTab && (nextTab.kind === "messaging" || nextTab.kind === "storage") ? { activeConnId: nextTab.connId } : {}) });
+    set({
+      tabs,
+      layout,
+      activeTabId,
+      activePaneId: findLeafByTab(layout, activeTabId)?.id ?? get().activePaneId,
+      ...(nextTab && (nextTab.kind === "messaging" || nextTab.kind === "storage")
+        ? { activeConnId: nextTab.connId }
+        : {}),
+    });
     if (get().tabs.length === 0) get().newChat();
   },
 
   setActiveTab: (activeTabId) => {
     const tab = get().tabs.find((t) => t.id === activeTabId);
-    set({ activeTabId, view: "chat", ...(tab && (tab.kind === "messaging" || tab.kind === "storage") ? { activeConnId: tab.connId } : {}) });
+    const layout = activateTabInLayout(get().layout, activeTabId);
+    set({
+      layout,
+      activeTabId,
+      activePaneId: findLeafByTab(layout, activeTabId)?.id ?? get().activePaneId,
+      view: "chat",
+      ...(tab && (tab.kind === "messaging" || tab.kind === "storage") ? { activeConnId: tab.connId } : {}),
+    });
   },
 
   sendChat: async (text) => {
@@ -1227,7 +1628,8 @@ export const useStore = create<Store>((set, get) => ({
         s.id === sessionId
           ? {
               ...s,
-              title: s.messages.length === 0 ? text : s.title,
+              // 仅未命名的新会话自动用首条提问做标题，重命名后保持不变
+              title: s.messages.length === 0 && s.title === "新对话" ? text : s.title,
               // 上一轮未完成的步骤统一视为中断，避免留下点不动的确认按钮
               messages: [
                 ...s.messages.map((m) =>
@@ -1237,12 +1639,21 @@ export const useStore = create<Store>((set, get) => ({
                 { role: "user", content: text },
               ],
               streaming: true,
+              // 记录本轮关联的连接 / 库 / 表，历史会话再次打开时自动带回
+              context: conn
+                ? {
+                    connId: conn.id,
+                    database,
+                    table: tree?.selectedTable ?? "",
+                    column: tree?.selectedColumn ?? "",
+                  }
+                : s.context,
             }
           : s
       ),
     });
     set({
-      tabs: get().tabs.map((t) => t.kind === "chat" && t.sessionId === sessionId && session.messages.length === 0
+      tabs: get().tabs.map((t) => t.kind === "chat" && t.sessionId === sessionId && t.title === "新对话"
         ? { ...t, title: text } : t),
     });
     saveChats(get().sessions);
@@ -1353,10 +1764,13 @@ export const useStore = create<Store>((set, get) => ({
 
   openResult: (result, title = "查询结果") => {
     const tabId = nextId("result");
+    const tab: Tab = { id: tabId, kind: "result", title, result };
+    const placed = insertTabInPreferred(get().layout, get().tabs, tab);
     set({
-      tabs: [...get().tabs, { id: tabId, kind: "result", title, result }],
+      tabs: [...get().tabs, tab],
+      layout: placed.layout,
       activeTabId: tabId,
-      resultView: "table",
+      activePaneId: placed.paneId,
       view: "chat",
     });
   },

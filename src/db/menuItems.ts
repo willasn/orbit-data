@@ -70,8 +70,9 @@ function toast(msg: string) {
   st().showToast(msg);
 }
 
+/** 打开（或激活）中间面板里的 SQL 编辑器标签页 */
 function showRight() {
-  useStore.setState({ showRight: true });
+  st().openSqlTab();
 }
 
 async function copyText(text: string, tip = "已复制") {
@@ -119,6 +120,12 @@ function ident(c: { conn: Connection }, name: string) {
 function splitQualified(name: string): [string, string] {
   const i = name.indexOf(".");
   return i > 0 && i < name.length - 1 ? [name.slice(0, i), name.slice(i + 1)] : ["dbo", name];
+}
+
+/** 拆分 schema.table，未带前缀时回落到指定默认 schema（PG 为 public，SQL Server 为 dbo） */
+function splitSchema(name: string, fallback: string): [string, string] {
+  const i = name.indexOf(".");
+  return i > 0 && i < name.length - 1 ? [name.slice(0, i), name.slice(i + 1)] : [fallback, name];
 }
 
 /** 行数限制语法：SQL Server 用 TOP n（写在 SELECT 之后），其余方言用 LIMIT n（写在末尾） */
@@ -214,10 +221,11 @@ function structureSql(c: TableCtx): string | null {
     case "postgres":
     case "timescaledb": {
       const esc = (v: string) => v.replace(/'/g, "''");
+      const [schema, name] = splitSchema(c.table, "public");
       return (
         `SELECT column_name, data_type, is_nullable, column_default\n` +
         `FROM information_schema.columns\n` +
-        `WHERE table_schema = 'public' AND table_name = '${esc(c.table)}'\n` +
+        `WHERE table_schema = '${esc(schema)}' AND table_name = '${esc(name)}'\n` +
         `ORDER BY ordinal_position`
       );
     }
@@ -232,10 +240,21 @@ function structureSql(c: TableCtx): string | null {
         `ORDER BY ORDINAL_POSITION`
       );
     }
+    case "sqlite": {
+      // SQLite 无 information_schema，用 pragma 表值函数
+      const esc = (v: string) => v.replace(/'/g, "''");
+      return (
+        `SELECT cid AS cid, name AS column_name, type AS data_type,\n` +
+        `  CASE "notnull" WHEN 1 THEN 'NO' ELSE 'YES' END AS is_nullable,\n` +
+        `  dflt_value AS column_default,\n` +
+        `  CASE pk WHEN 0 THEN '' ELSE 'PRI' END AS column_key\n` +
+        `FROM pragma_table_info('${esc(c.table)}')\n` +
+        `ORDER BY cid`
+      );
+    }
     case "oracle":
     case "dm":
     case "trino":
-    case "sqlite":
     case "duckdb":
     case "tdengine":
     case "questdb": {
@@ -278,6 +297,209 @@ function ddlSql(c: TableCtx): string | null {
   }
 }
 
+/** 索引 / 约束信息 SQL；当前类型无法表达时返回 null（菜单自动隐藏） */
+function indexSql(c: TableCtx): string | null {
+  const t = ident(c, c.table);
+  const esc = (v: string) => v.replace(/'/g, "''");
+  switch (c.conn.db_type) {
+    case "mysql":
+    case "mariadb":
+    case "tidb":
+    case "oceanbase":
+    case "doris":
+    case "starrocks":
+      return `SHOW INDEX FROM ${t}`;
+    case "postgres":
+    case "timescaledb": {
+      const [schema, name] = splitSchema(c.table, "public");
+      return (
+        `SELECT indexname, indexdef\nFROM pg_indexes\n` +
+        `WHERE schemaname = '${esc(schema)}' AND tablename = '${esc(name)}'\nORDER BY indexname`
+      );
+    }
+    case "sqlserver": {
+      const [schema, name] = splitQualified(c.table);
+      return (
+        `SELECT i.name AS index_name, i.type_desc, i.is_primary_key, i.is_unique, c.name AS column_name\n` +
+        `FROM sys.indexes i\n` +
+        `JOIN sys.index_columns ic ON ic.object_id = i.object_id AND ic.index_id = i.index_id\n` +
+        `JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id\n` +
+        `WHERE i.object_id = OBJECT_ID('${esc(schema)}.${esc(name)}')\n` +
+        `ORDER BY i.name, ic.key_ordinal`
+      );
+    }
+    case "oracle":
+    case "dm":
+      return (
+        `SELECT i.index_name, i.uniqueness, c.column_name, c.column_position\n` +
+        `FROM all_indexes i\n` +
+        `JOIN all_ind_columns c ON c.index_owner = i.owner AND c.index_name = i.index_name\n` +
+        `WHERE i.table_name = '${esc(c.table)}'` +
+        (c.database ? ` AND i.owner = '${esc(c.database)}'` : "") +
+        `\nORDER BY i.index_name, c.column_position`
+      );
+    case "sqlite":
+      return `PRAGMA index_list(${t})`;
+    case "duckdb":
+      return `SELECT index_name, is_unique, is_primary, expressions FROM duckdb_indexes() WHERE table_name = '${esc(c.table)}'`;
+    default:
+      return null;
+  }
+}
+
+/** 分区信息 SQL；当前类型无法表达时返回 null（菜单自动隐藏） */
+function partitionSql(c: TableCtx): string | null {
+  const t = ident(c, c.table);
+  const esc = (v: string) => v.replace(/'/g, "''");
+  switch (c.conn.db_type) {
+    case "clickhouse":
+      return (
+        `SELECT partition, sum(rows) AS rows, formatReadableSize(sum(bytes_on_disk)) AS size_on_disk,\n` +
+        `       count() AS parts, min(min_time) AS min_time, max(max_time) AS max_time\n` +
+        `FROM system.parts\n` +
+        `WHERE active AND database = '${esc(c.database)}' AND table = '${esc(c.table)}'\n` +
+        `GROUP BY partition\nORDER BY partition`
+      );
+    case "doris":
+    case "starrocks":
+      return `SHOW PARTITIONS FROM ${t}`;
+    case "hive":
+      return `SHOW PARTITIONS ${t}`;
+    default:
+      return null;
+  }
+}
+
+function hasVectorConsole(c: BaseCtx) {
+  return c.driver.kind === "vector" && c.driver.caps.console;
+}
+
+/** MongoDB 控制台命令（JSON 形式，直接交给后端 run_query） */
+function mongoCmd(command: Record<string, unknown>) {
+  return JSON.stringify(command, null, 2);
+}
+
+async function runMongo(c: DbCtx | TableCtx | ColumnCtx, command: Record<string, unknown>) {
+  await prepare(c);
+  await st().runSql(mongoCmd(command));
+}
+
+async function mongoTemplate(c: DbCtx | TableCtx, command: Record<string, unknown>) {
+  await prepare(c);
+  showRight();
+  st().setEditorSql(mongoCmd(command));
+}
+
+function vectorRequest(operation: string, body: Record<string, unknown>) {
+  return `POST /v2/vectordb/${operation}\n${JSON.stringify(body, null, 2)}`;
+}
+
+function vectorBody(c: DbCtx | TableCtx | ColumnCtx) {
+  return { dbName: c.database, ...("table" in c ? { collectionName: c.table } : {}) };
+}
+
+async function runVectorRead(c: DbCtx | TableCtx | ColumnCtx, operation: string, body = {}) {
+  await prepare(c);
+  await st().runSql(vectorRequest(operation, { ...vectorBody(c), ...body }));
+}
+
+async function vectorTemplate(c: TableCtx | ColumnCtx, operation: string, body: Record<string, unknown>) {
+  await prepare(c);
+  showRight();
+  st().setEditorSql(vectorRequest(operation, { ...vectorBody(c), ...body }));
+}
+
+async function vectorSearchTemplate(c: TableCtx | ColumnCtx) {
+  await prepare(c);
+  let columns = st().dbTree[c.conn.id]?.columnsTable === c.table
+    ? st().dbTree[c.conn.id]?.columns : null;
+  if (!columns) {
+    try {
+      columns = await api.listColumns(c.conn, c.database, c.table);
+    } catch {
+      // 元数据不可用时仍可生成模板，由用户填写字段和真实向量。
+    }
+  }
+  const field = "column" in c
+    ? columns?.find((col) => col.name === c.column)
+    : columns?.find((col) => /vector|^(100|101|102|103|104|105)(\D|$)/i.test(col.data_type));
+  const dim = (field?.data_type ?? ("dataType" in c ? c.dataType : ""))?.match(/dim\s*=\s*(\d+)/i)?.[1];
+  await vectorTemplate(c, "entities/search", {
+    annsField: "column" in c ? c.column : field?.name ?? "your-vector-field",
+    data: [[]], limit: 10, filter: "", outputFields: ["*"],
+  });
+  toast(`请将 data 中的空数组替换为真实查询向量${dim ? `（维度 ${dim}）` : "，并确认向量字段与维度"}，模板未执行`);
+}
+
+async function runVectorWrite(
+  c: BaseCtx, database: string, operation: string, body: Record<string, unknown>, title: string,
+  refresh?: () => Promise<void>, confirmed = false,
+) {
+  if (!confirmed && !await st().askConfirm({
+    title, message: `将在连接「${c.conn.name}」执行 ${operation}，请确认目标和参数。`,
+    confirmText: "执行", danger: true,
+  })) return;
+  try {
+    await prepare({ ...c, kind: "database", database });
+    await api.runQuery(c.conn, database, vectorRequest(operation, body));
+    toast(`${title}成功`);
+    await refresh?.();
+  } catch (e) {
+    toast(`${title}失败: ${e}`);
+  }
+}
+
+async function createVectorDatabase(c: ConnCtx) {
+  const input = await st().askText({ title: "新建向量数据库", placeholder: "数据库名称", confirmText: "下一步" });
+  const name = input?.trim();
+  if (!name) return;
+  if (!/^[A-Za-z_][A-Za-z0-9_]{0,254}$/.test(name)) {
+    toast("数据库名称须以字母或下划线开头，仅含字母、数字和下划线，最多 255 字符");
+    return;
+  }
+  await runVectorWrite(c, "", "databases/create", { dbName: name }, "新建向量数据库", () => refreshConn(c.conn.id));
+}
+
+async function createVectorCollection(c: DbCtx) {
+  const input = await st().askText({
+    title: "新建 Collection", message: "输入 Quick Setup JSON；dimension 为正整数，metricType 可选 COSINE / L2 / IP，idType 可选 Int64 / VarChar。",
+    value: JSON.stringify({ collectionName: "your_collection", dimension: 128, metricType: "COSINE", primaryFieldName: "id", idType: "Int64", autoID: true, vectorFieldName: "vector" }),
+    confirmText: "下一步",
+  });
+  if (input === null) return;
+  let body: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(input);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("请求必须为 JSON 对象");
+    body = parsed;
+    if (typeof body.collectionName !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,254}$/.test(body.collectionName) ||
+      !Number.isInteger(body.dimension) || Number(body.dimension) <= 0 ||
+      !["COSINE", "L2", "IP"].includes(String(body.metricType)) ||
+      !["Int64", "VarChar"].includes(String(body.idType)) || typeof body.autoID !== "boolean" ||
+      typeof body.primaryFieldName !== "string" || !body.primaryFieldName.trim() ||
+      typeof body.vectorFieldName !== "string" || !body.vectorFieldName.trim()) {
+      throw new Error("请完整填写集合名称、正整数维度、度量类型、主键名称与类型、autoID 和向量字段名称");
+    }
+  } catch (e) {
+    toast(`集合参数无效: ${e}`);
+    return;
+  }
+  await runVectorWrite(c, c.database, "collections/create", { ...body, dbName: c.database }, "新建 Collection", () => refreshTables(c));
+}
+
+async function dropVectorObject(c: DbCtx | TableCtx) {
+  const name = "table" in c ? c.table : c.database;
+  const title = "table" in c ? "删除 Collection" : "删除向量数据库";
+  const input = await st().askText({
+    title: `${title}「${name}」`, message: "该操作不可撤销，请输入名称以确认。",
+    placeholder: name, expect: name, confirmText: "删除", danger: true,
+  });
+  if (input === null) return;
+  if (input !== name) { toast("名称不匹配,已取消"); return; }
+  await runVectorWrite(c, c.database, "table" in c ? "collections/drop" : "databases/drop",
+    vectorBody(c), title, () => "table" in c ? refreshTables(c) : refreshConn(c.conn.id), true);
+}
+
 /* ────────────────── 连接级（统一） ────────────────── */
 
 const CONNECTION_ITEMS: Items<ConnCtx> = [
@@ -305,7 +527,11 @@ const CONNECTION_ITEMS: Items<ConnCtx> = [
     run: async (c) => {
       await st().selectConnection(c.conn.id);
       showRight();
-      st().setEditorSql(c.driver.caps.mapping ? "GET /_cluster/health" : "KEYS *");
+      st().setEditorSql(hasVectorConsole(c)
+        ? vectorRequest("collections/list", { dbName: st().dbTree[c.conn.id]?.selectedDb || c.conn.database || "default" })
+        : c.driver.kind === "doc"
+        ? mongoCmd({ find: "your_collection", filter: {}, limit: 20 })
+        : c.driver.caps.mapping ? "GET /_cluster/health" : "KEYS *");
     },
   },
   {
@@ -316,6 +542,7 @@ const CONNECTION_ITEMS: Items<ConnCtx> = [
       canCreateSqlObject(c.driver),
     run: runCreateDb,
   },
+  { id: "conn.createVectorDb", label: "新建数据库…", when: (c) => hasVectorConsole(c) && c.driver.caps.databases && c.driver.caps.write, run: createVectorDatabase },
   { id: "conn.refresh", label: "刷新元数据", run: (c) => refreshConn(c.conn.id) },
   {
     id: "conn.connect",
@@ -556,13 +783,70 @@ const DB_ITEMS: Record<string, Items<DbCtx>> = {
     USE_DB_ITEM,
     { id: "db.refresh", label: "刷新集合列表", run: refreshTables },
     { sep: true },
-    { id: "db.stats", label: "库统计（dbStats）", when: (c) => c.driver.caps.stats, planned: true },
-    { id: "db.aggregate", label: "聚合管道编辑器", when: (c) => c.driver.caps.aggregate, planned: true },
+    {
+      id: "db.stats",
+      label: "库统计（dbStats）",
+      when: (c) => c.driver.caps.stats,
+      run: (c) => runMongo(c, { dbStats: 1 }),
+    },
+    {
+      id: "db.aggregate",
+      label: "聚合管道编辑器…",
+      when: (c) => c.driver.caps.aggregate,
+      run: (c) => mongoTemplate(c, { aggregate: "your_collection", pipeline: [{ $limit: 20 }], cursor: {} }),
+    },
     { sep: true },
-    { id: "db.create", label: "新建集合…", when: (c) => c.driver.caps.write, planned: true },
+    {
+      id: "db.create",
+      label: "新建集合…",
+      when: (c) => c.driver.caps.write,
+      run: async (c) => {
+        const input = await st().askText({
+          title: `在「${c.database}」新建集合`,
+          placeholder: "集合名称",
+          confirmText: "创建",
+        });
+        const name = input?.trim();
+        if (!name) return;
+        try {
+          await runMongo(c, { create: name });
+          toast(`已创建集合「${name}」`);
+          await refreshTables(c);
+        } catch (e) {
+          toast(`创建失败: ${e}`);
+        }
+      },
+    },
     { id: "db.import", label: "导入 JSON / 导出 JSON", when: (c) => c.driver.caps.export, planned: true },
     { sep: true },
-    { id: "db.drop", label: "删除库", when: (c) => c.driver.caps.write, danger: true, planned: true },
+    {
+      id: "db.drop",
+      label: "删除库",
+      when: (c) => c.driver.caps.write,
+      danger: true,
+      run: async (c) => {
+        const input = await st().askText({
+          title: `删除数据库「${c.database}」`,
+          message: "将删除该库下全部集合，该操作不可撤销。请输入库名以确认。",
+          placeholder: c.database,
+          expect: c.database,
+          confirmText: "删除",
+          danger: true,
+        });
+        if (input === null) return;
+        if (input !== c.database) {
+          toast("名称不匹配,已取消");
+          return;
+        }
+        try {
+          await runMongo(c, { dropDatabase: 1 });
+          toast(`已删除数据库「${c.database}」`);
+          await refreshConn(c.conn.id);
+        } catch (e) {
+          toast(`删除失败: ${e}`);
+        }
+      },
+    },
   ],
   vector: [
     { ...USE_DB_ITEM, when: (c) => c.driver.caps.databases && st().dbTree[c.conn.id]?.selectedDb !== c.database },
@@ -576,13 +860,30 @@ const DB_ITEMS: Record<string, Items<DbCtx>> = {
     { id: "db.drop", label: "删除库", when: (c) => c.driver.caps.databases && c.driver.caps.write, danger: true, planned: true },
   ],
   search: [
-    { id: "db.health", label: "集群健康", when: (c) => c.driver.caps.clusterHealth, planned: true },
+    {
+      id: "db.health",
+      label: "集群健康",
+      hint: "GET /_cluster/health",
+      when: (c) => c.driver.caps.clusterHealth,
+      run: async (c) => {
+        await prepare(c);
+        await st().runSql("GET /_cluster/health");
+      },
+    },
     { id: "db.refresh", label: "刷新索引列表", run: refreshTables },
     { sep: true },
     { id: "db.create", label: "新建索引…", hint: "settings（shards / replicas）+ mapping", when: (c) => c.driver.caps.write, planned: true },
     { id: "db.alias", label: "别名管理", planned: true },
     { sep: true },
-    { id: "db.shards", label: "分片 / 节点分布", planned: true },
+    {
+      id: "db.shards",
+      label: "分片 / 节点分布",
+      hint: "GET /_cat/shards?format=json",
+      run: async (c) => {
+        await prepare(c);
+        await st().runSql("GET /_cat/shards?format=json&h=index,shard,prirep,state,node");
+      },
+    },
   ],
   ts: [
     { ...USE_DB_ITEM, when: (c) => c.driver.caps.databases && st().dbTree[c.conn.id]?.selectedDb !== c.database },
@@ -686,8 +987,26 @@ const SQL_TABLE_ITEMS: Items<TableCtx> = [
   { id: "t.stats", label: "列统计（直方图）", when: (c) => c.driver.caps.stats, planned: true },
   { id: "t.export", label: "导出 CSV / JSON / SQL", when: (c) => c.driver.caps.export, planned: true },
   { sep: true },
-  { id: "t.index", label: "索引与约束", when: (c) => c.driver.caps.index, planned: true },
-  { id: "t.partition", label: "分区信息", when: (c) => c.driver.caps.partition, planned: true },
+  {
+    id: "t.index",
+    label: "索引与约束",
+    when: (c) => c.driver.caps.index && indexSql(c) !== null,
+    run: async (c) => {
+      await prepare(c);
+      const sql = indexSql(c);
+      if (sql) await st().runSql(sql);
+    },
+  },
+  {
+    id: "t.partition",
+    label: "分区信息",
+    when: (c) => c.driver.caps.partition && partitionSql(c) !== null,
+    run: async (c) => {
+      await prepare(c);
+      const sql = partitionSql(c);
+      if (sql) await st().runSql(sql);
+    },
+  },
   { sep: true },
   { id: "t.rename", label: "重命名表", when: (c) => c.driver.caps.write, planned: true },
   { id: "t.truncate", label: "清空表（TRUNCATE）", when: (c) => c.driver.caps.truncate, danger: true, planned: true },
@@ -808,18 +1127,113 @@ const TABLE_ITEMS: Record<string, Items<TableCtx>> = {
     { id: "t.copyName", label: "复制 Topic 名", run: (c) => copyText(c.table) },
   ],
   doc: [
-    { id: "t.preview", label: "预览文档", hint: "find().limit(20)", planned: true },
-    { id: "t.index", label: "查看索引", when: (c) => c.driver.caps.index, planned: true },
-    { id: "t.count", label: "文档计数", when: (c) => c.driver.caps.stats, planned: true },
-    { id: "t.stats", label: "集合统计（collStats）", when: (c) => c.driver.caps.stats, planned: true },
+    {
+      id: "t.preview",
+      label: "预览文档",
+      hint: "find().limit(20)",
+      run: (c) => runMongo(c, { find: c.table, filter: {}, limit: 20 }),
+    },
+    {
+      id: "t.index",
+      label: "查看索引",
+      when: (c) => c.driver.caps.index,
+      run: (c) => runMongo(c, { listIndexes: c.table }),
+    },
+    {
+      id: "t.count",
+      label: "文档计数",
+      when: (c) => c.driver.caps.stats,
+      run: (c) => runMongo(c, { count: c.table }),
+    },
+    {
+      id: "t.stats",
+      label: "集合统计（collStats）",
+      when: (c) => c.driver.caps.stats,
+      run: (c) => runMongo(c, { collStats: c.table }),
+    },
     { sep: true },
     { id: "t.copyName", label: "复制集合名", run: (c) => copyText(c.table) },
-    { id: "t.aggregate", label: "聚合管道编辑器", when: (c) => c.driver.caps.aggregate, planned: true },
+    {
+      id: "t.aggregate",
+      label: "聚合管道编辑器…",
+      when: (c) => c.driver.caps.aggregate,
+      run: (c) => mongoTemplate(c, {
+        aggregate: c.table,
+        pipeline: [{ $match: {} }, { $limit: 20 }],
+        cursor: {},
+      }),
+    },
     { id: "t.export", label: "导出 JSON / 导入 JSON", when: (c) => c.driver.caps.export, planned: true },
     { sep: true },
-    { id: "t.rename", label: "重命名集合", when: (c) => c.driver.caps.write, planned: true },
-    { id: "t.clear", label: "清空集合", when: (c) => c.driver.caps.write, danger: true, planned: true },
-    { id: "t.drop", label: "删除集合", when: (c) => c.driver.caps.write, danger: true, planned: true },
+    {
+      id: "t.rename",
+      label: "重命名集合",
+      when: (c) => c.driver.caps.write,
+      run: async (c) => {
+        const input = await st().askText({
+          title: `重命名集合「${c.table}」`,
+          value: c.table,
+          placeholder: "新的集合名",
+          confirmText: "重命名",
+        });
+        const next = input?.trim();
+        if (!next || next === c.table) return;
+        try {
+          await runMongo(c, {
+            renameCollection: `${c.database}.${c.table}`,
+            to: `${c.database}.${next}`,
+          });
+          toast(`已重命名为「${next}」`);
+          await refreshTables(c);
+        } catch (e) {
+          toast(`重命名失败: ${e}`);
+        }
+      },
+    },
+    {
+      id: "t.clear",
+      label: "清空集合",
+      when: (c) => c.driver.caps.write,
+      danger: true,
+      run: async (c) => {
+        const ok = await st().askConfirm({
+          title: "清空集合",
+          message: `将删除「${c.table}」中的全部文档（保留集合与索引），该操作不可撤销。`,
+          confirmText: "清空",
+          danger: true,
+        });
+        if (!ok) return;
+        try {
+          await runMongo(c, { delete: c.table, deletes: [{ q: {}, limit: 0 }] });
+          toast(`已清空集合「${c.table}」`);
+          await refreshTables(c);
+        } catch (e) {
+          toast(`清空失败: ${e}`);
+        }
+      },
+    },
+    {
+      id: "t.drop",
+      label: "删除集合",
+      when: (c) => c.driver.caps.write,
+      danger: true,
+      run: async (c) => {
+        const ok = await st().askConfirm({
+          title: "删除集合",
+          message: `确定删除集合「${c.table}」?该操作不可撤销。`,
+          confirmText: "删除",
+          danger: true,
+        });
+        if (!ok) return;
+        try {
+          await runMongo(c, { drop: c.table });
+          toast(`已删除集合「${c.table}」`);
+          await refreshTables(c);
+        } catch (e) {
+          toast(`删除失败: ${e}`);
+        }
+      },
+    },
   ],
   vector: [
     { id: "t.preview", label: "预览实体", hint: "向量字段折叠显示", planned: true },
@@ -908,9 +1322,66 @@ const COLUMN_ITEMS: Items<ColumnCtx> = [
   { id: "col.stats", label: "列统计", hint: "distinct / min / max / 空值率", when: (c) => c.driver.caps.stats, planned: true },
   { id: "col.comment", label: "查看注释 / 完整类型", when: (c) => c.driver.caps.columns, planned: true },
   { sep: true },
-  { id: "col.vector", label: "用此字段做向量检索…", when: (c) => c.driver.caps.vectorSearch, planned: true },
+  { id: "col.vector", label: "用此字段做向量检索…", when: (c) => hasVectorConsole(c) && c.driver.caps.vectorSearch && /vector|^(100|101|102|103|104|105)(\D|$)/i.test(c.dataType ?? ""), run: vectorSearchTemplate },
+  { id: "col.vector.planned", label: "用此字段做向量检索…", when: (c) => !hasVectorConsole(c) && c.driver.caps.vectorSearch, planned: true },
   { id: "col.mapping", label: "字段 mapping（analyzer / 可聚合）", when: (c) => c.driver.caps.mapping, planned: true },
   { id: "col.sample", label: "字段类型采样推断", when: (c) => c.driver.caps.sample, planned: true },
+];
+
+const VECTOR_DB_ITEMS: Items<DbCtx> = [
+  { ...USE_DB_ITEM, when: (c) => c.driver.caps.databases && st().dbTree[c.conn.id]?.selectedDb !== c.database },
+  { id: "db.console", label: "打开控制台", run: async (c) => { await prepare(c); showRight(); st().setEditorSql(vectorRequest("collections/list", vectorBody(c))); } },
+  { id: "db.refresh", label: "刷新 Collection", run: refreshTables },
+  { id: "db.describe", label: "数据库信息", run: (c) => runVectorRead(c, "databases/describe") },
+  { sep: true },
+  { id: "db.create", label: "新建 Collection…", when: (c) => c.driver.caps.write, run: createVectorCollection },
+  { id: "db.drop", label: "删除数据库…", when: (c) => c.driver.caps.databases && c.driver.caps.write, danger: true, run: dropVectorObject },
+];
+
+const VECTOR_TABLE_ITEMS: Items<TableCtx> = [
+  { id: "t.preview", label: "预览前 100 条实体", run: (c) => runVectorRead(c, "entities/query", { filter: "", outputFields: ["*"], limit: 100 }) },
+  { id: "t.schema", label: "查看 Schema", run: (c) => runVectorRead(c, "collections/describe") },
+  { id: "t.stats", label: "集合统计 / 实体数", when: (c) => c.driver.caps.stats, run: (c) => runVectorRead(c, "collections/get_stats") },
+  { id: "t.index", label: "索引列表", when: (c) => c.driver.caps.index, run: (c) => runVectorRead(c, "indexes/list") },
+  { id: "t.state", label: "加载状态", when: (c) => c.driver.caps.loadRelease, run: (c) => runVectorRead(c, "collections/get_load_state") },
+  { id: "t.partitions", label: "分区列表", run: (c) => runVectorRead(c, "partitions/list") },
+  { sep: true },
+  { id: "t.copyName", label: "复制集合名", run: (c) => copyText(c.table) },
+  { id: "t.search", label: "向量检索模板…", when: (c) => c.driver.caps.vectorSearch, run: vectorSearchTemplate },
+  { id: "t.get", label: "按主键获取模板…", run: (c) => vectorTemplate(c, "entities/get", { id: [], outputFields: ["*"] }) },
+  { id: "t.hybrid", label: "混合检索模板…", when: (c) => c.driver.caps.vectorSearch, run: async (c) => {
+    await vectorTemplate(c, "entities/hybrid_search", {
+      search: [{ annsField: "your_vector_field_1", data: [[]], limit: 10 }, { annsField: "your_vector_field_2", data: [[]], limit: 10 }],
+      rerank: { strategy: "rrf", params: { k: 60 } }, limit: 10, outputFields: ["*"],
+    });
+    toast("请填写两个真实向量字段与对应查询向量；模板未执行");
+  } },
+  { sep: true },
+  { id: "t.insert", label: "插入数据模板…", when: (c) => c.driver.caps.write, run: (c) => vectorTemplate(c, "entities/insert", { data: [] }) },
+  { id: "t.upsert", label: "Upsert 数据模板…", when: (c) => c.driver.caps.write, run: (c) => vectorTemplate(c, "entities/upsert", { data: [] }) },
+  { id: "t.delete", label: "删除实体模板…", when: (c) => c.driver.caps.write, danger: true, run: (c) => vectorTemplate(c, "entities/delete", { filter: "请填写精确的过滤表达式" }) },
+  { id: "t.createIndex", label: "创建索引模板…", when: (c) => c.driver.caps.index && c.driver.caps.write, run: (c) => vectorTemplate(c, "indexes/create", {
+    indexParams: [{ fieldName: "your_vector_field", indexName: "vector_index", metricType: "COSINE", params: { index_type: "AUTOINDEX" } }],
+  }) },
+  { id: "t.dropIndex", label: "删除索引模板…", when: (c) => c.driver.caps.index && c.driver.caps.write, danger: true, run: (c) => vectorTemplate(c, "indexes/drop", { indexName: "your_index" }) },
+  { id: "t.createPartition", label: "创建分区模板…", when: (c) => c.driver.caps.write, run: (c) => vectorTemplate(c, "partitions/create", { partitionName: "your_partition" }) },
+  { id: "t.dropPartition", label: "删除分区模板…", when: (c) => c.driver.caps.write, danger: true, run: (c) => vectorTemplate(c, "partitions/drop", { partitionName: "your_partition" }) },
+  { sep: true },
+  { id: "t.load", label: "加载集合…", when: (c) => c.driver.caps.loadRelease, run: (c) => runVectorWrite(c, c.database, "collections/load", vectorBody(c), "加载集合") },
+  { id: "t.release", label: "释放集合…", when: (c) => c.driver.caps.loadRelease, run: (c) => runVectorWrite(c, c.database, "collections/release", vectorBody(c), "释放集合") },
+  { id: "t.rename", label: "重命名集合…", when: (c) => c.driver.caps.write, run: async (c) => {
+    const input = await st().askText({ title: `重命名 Collection「${c.table}」`, placeholder: "新集合名称", confirmText: "重命名" });
+    const name = input?.trim();
+    if (!name) return;
+    if (!/^[A-Za-z_][A-Za-z0-9_]{0,254}$/.test(name)) {
+      toast("集合名称须以字母或下划线开头，仅含字母、数字和下划线，最多 255 字符");
+      return;
+    }
+    if (name === c.table) { toast("新名称与原名称相同"); return; }
+    await runVectorWrite(c, c.database, "collections/rename",
+      { ...vectorBody(c), newCollectionName: name }, "重命名 Collection", () => refreshTables(c));
+  } },
+  { id: "t.drop", label: "删除 Collection…", when: (c) => c.driver.caps.write, danger: true, run: dropVectorObject },
 ];
 
 /* ────────────────── 组装 ────────────────── */
@@ -942,9 +1413,9 @@ export function buildMenu(ctx: MenuCtx): MenuEntry[] {
     case "connection":
       return render(CONNECTION_ITEMS, ctx);
     case "database":
-      return render(DB_ITEMS[ctx.driver.kind] ?? [], ctx);
+      return render(hasVectorConsole(ctx) ? VECTOR_DB_ITEMS : DB_ITEMS[ctx.driver.kind] ?? [], ctx);
     case "table":
-      return render(TABLE_ITEMS[ctx.driver.kind] ?? [], ctx);
+      return render(hasVectorConsole(ctx) ? VECTOR_TABLE_ITEMS : TABLE_ITEMS[ctx.driver.kind] ?? [], ctx);
     case "column":
       return render(COLUMN_ITEMS, ctx);
   }

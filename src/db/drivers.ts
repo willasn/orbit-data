@@ -90,7 +90,7 @@ export interface DriverMeta {
   quote: "`" | '"' | "[]" | "";
   /** 当前应用已实现的创建表单与执行方言 */
   createDialect?: "mysql" | "postgres" | "redis" | "clickhouse";
-  queryLanguage?: "elasticsearch";
+  queryLanguage?: "elasticsearch" | "milvus" | "mongodb";
   caps: Caps;
 }
 
@@ -192,10 +192,10 @@ const DRIVER_LIST: DriverMeta[] = [
   { type: "memcached", label: "Memcached", kind: "kv", defaultPort: 11211, color: "#94a3b8", dbLabel: "实例", tableLabel: "键", quote: "", caps: { ...BASE, console: true, write: true } },
 
   // ── doc ─────────────────────────────────────────────────────
-  { type: "mongodb", label: "MongoDB", kind: "doc", defaultPort: 27017, color: "#47a248", dbLabel: "数据库", tableLabel: "集合", quote: "", caps: { ...BASE, console: true, databases: true, tables: true, columns: true, write: true, stats: true, export: true, index: true, aggregate: true, sample: true } },
+  { type: "mongodb", label: "MongoDB", kind: "doc", defaultPort: 27017, color: "#47a248", dbLabel: "数据库", tableLabel: "集合", quote: "", queryLanguage: "mongodb", caps: { ...BASE, console: true, databases: true, tables: true, columns: true, write: true, stats: true, export: true, index: true, aggregate: true, sample: true } },
 
   // ── vector ──────────────────────────────────────────────────
-  { type: "milvus", label: "Milvus", kind: "vector", defaultPort: 19530, color: "#0284c7", dbLabel: "数据库", tableLabel: "Collection", quote: "", caps: { ...BASE, databases: true, tables: true, columns: true, write: true, stats: true, export: true, index: true, vectorSearch: true, loadRelease: true } },
+  { type: "milvus", label: "Milvus", kind: "vector", defaultPort: 19530, color: "#0284c7", dbLabel: "数据库", tableLabel: "Collection", quote: "", queryLanguage: "milvus", caps: { ...BASE, console: true, databases: true, tables: true, columns: true, write: true, stats: true, export: true, index: true, vectorSearch: true, loadRelease: true } },
   { type: "qdrant", label: "Qdrant", kind: "vector", defaultPort: 6333, color: "#7c3aed", dbLabel: "实例", tableLabel: "Collection", quote: "", caps: { ...BASE, tables: true, columns: true, write: true, stats: true, export: true, index: true, vectorSearch: true } },
 
   // ── search ──────────────────────────────────────────────────
@@ -242,7 +242,13 @@ export function defaultPortOf(type: string): number {
 export function quoteIdent(type: string, name: string): string {
   const q = driverOf(type).quote;
   if (q === "`") return `\`${name.replace(/`/g, "``")}\``;
-  if (q === '"') return `"${name.replace(/"/g, '""')}"`;
+  if (q === '"') {
+    // PostgreSQL / Oracle 等：schema.table 这类限定名需逐段转义（"sales"."Orders"）
+    return name
+      .split(".")
+      .map((part) => `"${part.replace(/"/g, '""')}"`)
+      .join(".");
+  }
   if (q === "[]") {
     // SQL Server：schema.table 这类限定名需逐段转义（[sales].[Orders]）
     return name

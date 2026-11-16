@@ -33,6 +33,8 @@ pub struct MqttConfig {
     pub ca_file: String,
     pub client_cert_file: String,
     pub client_key_file: String,
+    /// mqtts / wss 下跳过服务端证书校验（自签或 IP 证书场景），勾选后客户端证书不生效
+    pub insecure_skip_verify: bool,
     pub will_topic: String,
     pub will_payload: String,
     pub will_qos: u8,
@@ -131,13 +133,19 @@ pub struct ModelConfig {
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct SyncConfig {
     #[serde(default)]
-    pub repo_path: String,
+    pub remote_url: String,
+    /// 留空时使用 main；远程不存在该分支时自动新建
     #[serde(default)]
     pub branch: String,
+    /// Git 认证用户名
     #[serde(default)]
-    pub remote_url: String,
+    pub username: String,
+    /// Git 认证密码或访问令牌
     #[serde(default)]
-    pub auto_push: bool,
+    pub password: String,
+    /// 提交作者邮箱
+    #[serde(default)]
+    pub email: String,
 }
 
 /// 应用总配置(持久化为 JSON)
@@ -174,6 +182,14 @@ impl ConfigStore {
             Ok(s) => serde_json::from_str(&s).map_err(|e| format!("配置解析失败: {e}")),
             Err(_) => Ok(AppConfig::default()),
         }
+    }
+
+    /// 内置同步仓库目录：位于应用配置目录下的 sync-repo，不向用户暴露
+    pub fn sync_repo_dir(&self) -> PathBuf {
+        let p = self.path.lock().unwrap();
+        p.parent()
+            .map(|dir| dir.join("sync-repo"))
+            .unwrap_or_else(|| PathBuf::from("sync-repo"))
     }
 
     pub fn write(&self, cfg: &AppConfig) -> Result<(), String> {

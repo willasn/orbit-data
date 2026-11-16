@@ -1,6 +1,8 @@
 pub mod clickhouse;
 pub mod elasticsearch;
 pub mod kafka;
+pub mod milvus;
+pub mod mongodb;
 pub mod mqtt;
 pub mod mssql;
 pub mod mysql;
@@ -8,6 +10,7 @@ pub mod oss;
 pub mod pg;
 pub mod redis;
 pub mod session;
+pub mod sqlite;
 
 use crate::config::Connection;
 use serde::{Deserialize, Serialize};
@@ -249,6 +252,9 @@ pub async fn test_connection(c: &Connection) -> Result<String, String> {
             "clickhouse" => clickhouse::test(c).await,
             "redis" => redis::test(c).await,
             "elasticsearch" => elasticsearch::test(c).await,
+            "milvus" => milvus::test(c).await,
+            "mongodb" => mongodb::test(c).await,
+            "sqlite" => sqlite::test(c).await,
             "kafka" => kafka::test(c).await,
             "mqtt" => mqtt::test(c).await,
             "aliyun_oss" => oss::test(c).await,
@@ -265,7 +271,11 @@ pub async fn list_databases(c: &Connection) -> Result<Vec<String>, String> {
         "postgres" => pg::list_databases(c).await,
         "sqlserver" => mssql::list_databases(c).await,
         "clickhouse" => clickhouse::list_databases(c).await,
+        "milvus" => milvus::list_databases(c).await,
+        "mongodb" => mongodb::list_databases(c).await,
         "redis" => Ok(vec!["db0".to_string()]),
+        // SQLite 为单文件库，无库级节点（caps.databases = false）
+        "sqlite" => Ok(vec![]),
         "elasticsearch" | "kafka" | "mqtt" => Ok(vec![]),
         "aliyun_oss" => {
             let mut buckets = oss::list_bucket_names(c).await?;
@@ -282,7 +292,10 @@ pub async fn list_tables(c: &Connection, database: &str) -> Result<Vec<TableInfo
         "postgres" => pg::list_tables(c, database).await,
         "sqlserver" => mssql::list_tables(c, database).await,
         "clickhouse" => clickhouse::list_tables(c, database).await,
+        "milvus" => milvus::list_tables(c, database).await,
+        "mongodb" => mongodb::list_tables(c, database).await,
         "redis" => redis::list_tables(c).await,
+        "sqlite" => sqlite::list_tables(c, database).await,
         "elasticsearch" => elasticsearch::list_tables(c).await,
         "kafka" => kafka::tables(c).await,
         "mqtt" => Ok(vec![]),
@@ -301,7 +314,10 @@ pub async fn list_columns(
         "postgres" => pg::list_columns(c, database, table).await,
         "sqlserver" => mssql::list_columns(c, database, table).await,
         "clickhouse" => clickhouse::list_columns(c, database, table).await,
+        "milvus" => milvus::list_columns(c, database, table).await,
+        "mongodb" => mongodb::list_columns(c, database, table).await,
         "elasticsearch" => elasticsearch::list_columns(c, table).await,
+        "sqlite" => sqlite::list_columns(c, database, table).await,
         _ => Err("该数据库类型不支持列信息".into()),
     }
 }
@@ -318,6 +334,9 @@ pub async fn run_query(
         "sqlserver" => mssql::query(c, database, sql, limit).await,
         "clickhouse" => clickhouse::query(c, database, sql, limit).await,
         "elasticsearch" => elasticsearch::query(c, database, sql, limit).await,
+        "milvus" => milvus::query(c, database, sql, limit).await,
+        "mongodb" => mongodb::query(c, database, sql, limit).await,
+        "sqlite" => sqlite::query(c, database, sql, limit).await,
         "redis" => Err("Redis 请在对话或命令面板中使用 Redis 命令".into()),
         "kafka" => Err("Kafka 请使用消息工作区，不支持 SQL 执行".into()),
         "mqtt" => Err("MQTT 请使用消息工作区，不支持 SQL 执行".into()),

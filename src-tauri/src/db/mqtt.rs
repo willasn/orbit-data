@@ -2,7 +2,13 @@
 //!
 //! 前端按 `mqtt_messages` 增量轮询（seq 递增），避免为每条消息建立事件通道。
 use crate::config::{Connection, MqttConfig};
-use rumqttc::{AsyncClient, Event as EventV3, LastWill, MqttOptions, Packet as PacketV3, QoS, Transport};
+use rumqttc::{
+    AsyncClient, Event as EventV3, LastWill, MqttOptions, Packet as PacketV3, QoS, TlsConfiguration,
+    Transport,
+};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{ClientConfig, DigitallySignedStruct, SignatureScheme};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -54,6 +60,8 @@ pub struct MqttMessage {
     /// true = 本客户端发布，false = 从 Broker 收到
     pub sent: bool,
     pub ts: u64,
+    /// MQTT 5 用户属性（3.1.1 恒为空）
+    pub user_properties: Vec<(String, String)>,
 }
 
 #[derive(serde::Serialize)]
@@ -140,7 +148,15 @@ fn decode_payload(text: &str, format: &str) -> Result<Vec<u8>, String> {
     }
 }
 
-fn record(state: &Arc<Mutex<ClientState>>, topic: String, payload: Vec<u8>, qos: u8, retain: bool, sent: bool) {
+fn record(
+    state: &Arc<Mutex<ClientState>>,
+    topic: String,
+    payload: Vec<u8>,
+    qos: u8,
+    retain: bool,
+    sent: bool,
+    user_properties: Vec<(String, String)>,
+) {
     let mut st = state.lock().unwrap();
     st.seq += 1;
     let seq = st.seq;
@@ -154,6 +170,7 @@ fn record(state: &Arc<Mutex<ClientState>>, topic: String, payload: Vec<u8>, qos:
         retain,
         sent,
         ts: now_ms(),
+        user_properties,
     };
     if st.messages.len() >= MESSAGE_LIMIT {
         st.messages.pop_front();
@@ -189,19 +206,92 @@ fn read_optional(path: &str) -> Result<Vec<u8>, String> {
     std::fs::read(path.trim()).map_err(|e| format!("读取证书文件失败: {e}"))
 }
 
+/// 显式勾选「跳过证书校验」时使用的空校验器，仅由用户配置触发，不做默认行为
+#[derive(Debug)]
+struct NoCertVerifier;
+
+impl ServerCertVerifier for NoCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        use SignatureScheme::*;
+        vec![
+            RSA_PKCS1_SHA256,
+            RSA_PKCS1_SHA384,
+            RSA_PKCS1_SHA512,
+            ECDSA_NISTP256_SHA256,
+            ECDSA_NISTP384_SHA384,
+            ECDSA_NISTP521_SHA512,
+            RSA_PSS_SHA256,
+            RSA_PSS_SHA384,
+            RSA_PSS_SHA512,
+            ED25519,
+        ]
+    }
+}
+
+/// 跳过校验的 TLS 传输（mqtts / wss 共用），显式指定 ring Provider 避免全局默认未安装时 panic
+fn insecure_transport(is_ws: bool) -> Transport {
+    let config = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .expect("rustls 默认协议版本配置失败")
+    .dangerous()
+    .with_custom_certificate_verifier(Arc::new(NoCertVerifier))
+    .with_no_client_auth();
+    let tls = TlsConfiguration::Rustls(Arc::new(config));
+    if is_ws {
+        Transport::wss_with_config(tls)
+    } else {
+        Transport::tls_with_config(tls)
+    }
+}
+
 fn build_transport(cfg: &MqttConfig) -> Result<Transport, String> {
     let ca = read_optional(&cfg.ca_file)?;
     let cert = read_optional(&cfg.client_cert_file)?;
     let key = read_optional(&cfg.client_key_file)?;
     let client_auth = if !cert.is_empty() && !key.is_empty() { Some((cert, key)) } else { None };
     match cfg.protocol.as_str() {
-        "mqtts" => Ok(if ca.is_empty() {
+        "mqtts" => Ok(if cfg.insecure_skip_verify {
+            insecure_transport(false)
+        } else if ca.is_empty() {
             Transport::tls_with_default_config()
         } else {
             Transport::tls(ca, client_auth, None)
         }),
         "ws" => Ok(Transport::ws()),
-        "wss" => Ok(if ca.is_empty() {
+        "wss" => Ok(if cfg.insecure_skip_verify {
+            insecure_transport(true)
+        } else if ca.is_empty() {
             Transport::wss_with_default_config()
         } else {
             Transport::wss(ca, client_auth, None)
@@ -406,7 +496,16 @@ impl MqttManager {
             .ok_or("MQTT 未连接，请先连接再操作".into())
     }
 
-    pub async fn subscribe(&self, conn_id: &str, topic: &str, qos: u8) -> Result<(), String> {
+    /// MQTT 5 订阅选项（no_local / retain_as_published / retain_handling）在 3.1.1 下忽略
+    pub async fn subscribe(
+        &self,
+        conn_id: &str,
+        topic: &str,
+        qos: u8,
+        no_local: bool,
+        retain_as_published: bool,
+        retain_handling: u8,
+    ) -> Result<(), String> {
         let topic = topic.trim();
         if topic.is_empty() {
             return Err("订阅主题不能为空".into());
@@ -423,7 +522,25 @@ impl MqttManager {
         };
         match client {
             ClientHandle::V3(c) => c.subscribe(topic, qos_of(qos)).await.map_err(|e| format!("订阅失败: {e}")),
-            ClientHandle::V5(c) => c.subscribe(topic, qos_of_v5(qos)).await.map_err(|e| format!("订阅失败: {e}")),
+            ClientHandle::V5(c) => {
+                let has_options = no_local || retain_as_published || retain_handling != 0;
+                if !has_options {
+                    return c.subscribe(topic, qos_of_v5(qos)).await.map_err(|e| format!("订阅失败: {e}"));
+                }
+                use rumqttc::v5::mqttbytes::v5::{Filter, RetainForwardRule};
+                let filter = Filter {
+                    path: topic.to_string(),
+                    qos: qos_of_v5(qos),
+                    nolocal: no_local,
+                    preserve_retain: retain_as_published,
+                    retain_forward_rule: match retain_handling {
+                        1 => RetainForwardRule::OnNewSubscribe,
+                        2 => RetainForwardRule::Never,
+                        _ => RetainForwardRule::OnEverySubscribe,
+                    },
+                };
+                c.subscribe_many(vec![filter]).await.map_err(|e| format!("订阅失败: {e}"))
+            }
         }
     }
 
@@ -444,6 +561,7 @@ impl MqttManager {
         }
     }
 
+    /// user_properties 仅 MQTT 5 生效，3.1.1 下忽略
     pub async fn publish(
         &self,
         conn_id: &str,
@@ -452,6 +570,7 @@ impl MqttManager {
         retain: bool,
         payload: &str,
         format: &str,
+        user_properties: Vec<(String, String)>,
     ) -> Result<(), String> {
         let topic = topic.trim().to_string();
         if topic.is_empty() {
@@ -473,13 +592,24 @@ impl MqttManager {
                 .publish(topic.clone(), qos_of(qos), retain, bytes.clone())
                 .await
                 .map_err(|e| format!("发布失败: {e}"))?,
-            ClientHandle::V5(c) => c
-                .publish(topic.clone(), qos_of_v5(qos), retain, bytes.clone())
-                .await
-                .map_err(|e| format!("发布失败: {e}"))?,
+            ClientHandle::V5(c) => {
+                if user_properties.is_empty() {
+                    c.publish(topic.clone(), qos_of_v5(qos), retain, bytes.clone())
+                        .await
+                        .map_err(|e| format!("发布失败: {e}"))?;
+                } else {
+                    let props = rumqttc::v5::mqttbytes::v5::PublishProperties {
+                        user_properties: user_properties.clone(),
+                        ..Default::default()
+                    };
+                    c.publish_with_properties(topic.clone(), qos_of_v5(qos), retain, bytes.clone(), props)
+                        .await
+                        .map_err(|e| format!("发布失败: {e}"))?;
+                }
+            }
         }
         if let Ok(state) = self.state_of(conn_id) {
-            record(&state, topic, bytes, qos, retain, true);
+            record(&state, topic, bytes, qos, retain, true, user_properties);
         }
         Ok(())
     }
@@ -516,12 +646,18 @@ mod tests {
     use super::*;
 
     /// 集成测试只从环境变量读取测试 Broker，避免把真实地址与凭据写入仓库。
+    /// 可选变量：ORBIT_MQTT_TEST_PROTOCOL（mqtt | mqtts）、ORBIT_MQTT_TEST_INSECURE（1 跳过证书校验）
     fn test_conn(version: &str) -> Option<Connection> {
+        // 测试入口不经过 run()，需手动安装 rustls 默认 Provider（mqtts 建连依赖）
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let host = std::env::var("ORBIT_MQTT_TEST_HOST").ok()?.trim().to_string();
         if host.is_empty() {
             return None;
         }
         let port = std::env::var("ORBIT_MQTT_TEST_PORT").ok()?.parse::<u16>().ok()?;
+        let protocol = std::env::var("ORBIT_MQTT_TEST_PROTOCOL").unwrap_or_else(|_| "mqtt".into());
+        let insecure =
+            matches!(std::env::var("ORBIT_MQTT_TEST_INSECURE").as_deref(), Ok("1") | Ok("true"));
         Some(Connection {
             id: format!("test-{version}-{}", now_ms()),
             name: "mqtt-test".into(),
@@ -531,15 +667,34 @@ mod tests {
             username: std::env::var("ORBIT_MQTT_TEST_USERNAME").unwrap_or_default(),
             password: std::env::var("ORBIT_MQTT_TEST_PASSWORD").unwrap_or_default(),
             mqtt: Some(MqttConfig {
-                protocol: "mqtt".into(),
+                protocol,
+                insecure_skip_verify: insecure,
                 mqtt_version: version.into(),
                 clean_start: true,
                 keep_alive_secs: 30,
+                connection_timeout_secs: 5,
                 client_id: format!("orbit-data-test-{version}-{}-{}", now_ms(), std::process::id()),
                 ..Default::default()
             }),
             ..Default::default()
         })
+    }
+
+    /// 轮询消息缓冲，等待满足条件且来自 Broker 的消息（最长约 6 秒）
+    async fn wait_recv(
+        manager: &MqttManager,
+        conn_id: &str,
+        pred: impl Fn(&MqttMessage) -> bool,
+    ) -> bool {
+        for _ in 0..60 {
+            if let Ok(page) = manager.page(conn_id, 0) {
+                if page.messages.iter().any(|m| !m.sent && pred(m)) {
+                    return true;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
     }
 
     async fn roundtrip(version: &str) {
@@ -552,23 +707,18 @@ mod tests {
         assert!(detail.contains("MQTT"), "连接信息异常: {detail}");
 
         let topic = format!("orbit-data/test/{version}/{}", now_ms());
-        manager.subscribe(&conn.id, &topic, 1).await.expect("订阅失败");
+        manager.subscribe(&conn.id, &topic, 1, false, false, 0).await.expect("订阅失败");
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         manager
-            .publish(&conn.id, &topic, 1, false, "hello-orbit", "plaintext")
+            .publish(&conn.id, &topic, 1, false, "hello-orbit", "plaintext", Vec::new())
             .await
             .expect("发布失败");
 
-        let mut received = false;
-        for _ in 0..40 {
-            let page = manager.page(&conn.id, 0).expect("读取消息失败");
-            if page.messages.iter().any(|m| m.topic == topic && !m.sent && m.payload == "hello-orbit") {
-                received = true;
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(100)).await;
-        }
+        let received = wait_recv(&manager, &conn.id, |m| {
+            m.topic == topic && m.payload == "hello-orbit"
+        })
+        .await;
         assert!(received, "未收到订阅消息（topic={topic}）");
 
         manager.unsubscribe(&conn.id, &topic).await.expect("取消订阅失败");
@@ -584,6 +734,302 @@ mod tests {
     async fn mqtt311_roundtrip() {
         roundtrip("3.1.1").await;
     }
+
+    /// QoS 0/1/2 发布订阅矩阵：订阅 QoS 2，逐级发布并核对收到的 QoS
+    #[tokio::test]
+    async fn qos_matrix() {
+        let Some(conn) = test_conn("5.0") else { return; };
+        let manager = MqttManager::default();
+        connect(&manager, &conn).await.expect("连接失败");
+        let base = format!("orbit-data/test/qos/{}", now_ms());
+        manager.subscribe(&conn.id, &format!("{base}/#"), 2, false, false, 0).await.expect("订阅失败");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        for q in [0u8, 1, 2] {
+            let topic = format!("{base}/q{q}");
+            let payload = format!("qos-{q}");
+            manager.publish(&conn.id, &topic, q, false, &payload, "plaintext", Vec::new()).await.expect("发布失败");
+            let got = wait_recv(&manager, &conn.id, |m| m.topic == topic && m.payload == payload).await;
+            assert!(got, "QoS {q} 未收到消息（topic={topic}）");
+        }
+        manager.disconnect(&conn.id);
+    }
+
+    /// Retain：先发布保留消息，再新建订阅应立刻收到 Broker 缓存的副本
+    #[tokio::test]
+    async fn retain_delivery() {
+        let Some(conn) = test_conn("5.0") else { return; };
+        let manager = MqttManager::default();
+        connect(&manager, &conn).await.expect("连接失败");
+        let topic = format!("orbit-data/test/retain/{}", now_ms());
+        manager
+            .publish(&conn.id, &topic, 1, true, "retained-hello", "plaintext", Vec::new())
+            .await
+            .expect("发布失败");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        manager.subscribe(&conn.id, &topic, 1, false, false, 0).await.expect("订阅失败");
+        let got = wait_recv(&manager, &conn.id, |m| {
+            m.topic == topic && m.payload == "retained-hello" && m.retain
+        })
+        .await;
+        assert!(got, "未收到 Retain 消息（topic={topic}）");
+        manager.disconnect(&conn.id);
+    }
+
+    /// 通配符订阅：单层 + 与多层 #
+    #[tokio::test]
+    async fn wildcard_subscription() {
+        let Some(conn) = test_conn("5.0") else { return; };
+        let manager = MqttManager::default();
+        connect(&manager, &conn).await.expect("连接失败");
+        let base = format!("orbit-data/test/wild/{}", now_ms());
+        manager.subscribe(&conn.id, &format!("{base}/+/single"), 1, false, false, 0).await.expect("订阅失败");
+        manager.subscribe(&conn.id, &format!("{base}/deep/#"), 1, false, false, 0).await.expect("订阅失败");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        manager
+            .publish(&conn.id, &format!("{base}/a/single"), 1, false, "w1", "plaintext", Vec::new())
+            .await
+            .expect("发布失败");
+        manager
+            .publish(&conn.id, &format!("{base}/deep/x/y"), 1, false, "w2", "plaintext", Vec::new())
+            .await
+            .expect("发布失败");
+        let w1 = wait_recv(&manager, &conn.id, |m| m.payload == "w1").await;
+        let w2 = wait_recv(&manager, &conn.id, |m| m.payload == "w2").await;
+        assert!(w1, "单层通配符 + 未命中");
+        assert!(w2, "多层通配符 # 未命中");
+        manager.disconnect(&conn.id);
+    }
+
+    /// 取消订阅后不再收到新消息
+    #[tokio::test]
+    async fn unsubscribe_stops() {
+        let Some(conn) = test_conn("5.0") else { return; };
+        let manager = MqttManager::default();
+        connect(&manager, &conn).await.expect("连接失败");
+        let topic = format!("orbit-data/test/unsub/{}", now_ms());
+        manager.subscribe(&conn.id, &topic, 1, false, false, 0).await.expect("订阅失败");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        manager.publish(&conn.id, &topic, 1, false, "before-unsub", "plaintext", Vec::new()).await.expect("发布失败");
+        assert!(wait_recv(&manager, &conn.id, |m| m.payload == "before-unsub").await, "取消订阅前未收到");
+        manager.unsubscribe(&conn.id, &topic).await.expect("取消订阅失败");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        manager.publish(&conn.id, &topic, 1, false, "after-unsub", "plaintext", Vec::new()).await.expect("发布失败");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let page = manager.page(&conn.id, 0).expect("读取消息失败");
+        let leaked = page.messages.iter().any(|m| !m.sent && m.payload == "after-unsub");
+        assert!(!leaked, "取消订阅后仍收到消息");
+        manager.disconnect(&conn.id);
+    }
+
+    /// Base64 / Hex 编码发布：Broker 收到的字节应与解码结果一致
+    #[tokio::test]
+    async fn payload_formats() {
+        let Some(conn) = test_conn("5.0") else { return; };
+        let manager = MqttManager::default();
+        connect(&manager, &conn).await.expect("连接失败");
+        let topic = format!("orbit-data/test/fmt/{}", now_ms());
+        manager.subscribe(&conn.id, &topic, 1, false, false, 0).await.expect("订阅失败");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        manager
+            .publish(&conn.id, &topic, 1, false, "aGVsbG8tdGVzdA==", "base64", Vec::new())
+            .await
+            .expect("Base64 发布失败");
+        manager
+            .publish(&conn.id, &topic, 1, false, "4845582d6279746573", "hex", Vec::new())
+            .await
+            .expect("Hex 发布失败");
+        let b64 = wait_recv(&manager, &conn.id, |m| m.payload == "hello-test").await;
+        let hex = wait_recv(&manager, &conn.id, |m| m.payload == "HEX-bytes").await;
+        assert!(b64, "Base64 解码内容未收到");
+        assert!(hex, "Hex 解码内容未收到");
+        manager.disconnect(&conn.id);
+    }
+
+    /// 遗嘱消息：客户端未正常 DISCONNECT 直接断开时，Broker 应发布遗嘱
+    #[tokio::test]
+    async fn will_message_fires() {
+        let Some(mut conn) = test_conn("3.1.1") else { return; };
+        let manager = MqttManager::default();
+        connect(&manager, &conn).await.expect("订阅端连接失败");
+        let sub_id = conn.id.clone();
+        let will_topic = format!("orbit-data/test/will/{}", now_ms());
+        manager.subscribe(&sub_id, &will_topic, 1, false, false, 0).await.expect("订阅失败");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 遗嘱端：独立客户端，配置遗嘱后不发送 DISCONNECT 直接丢弃连接
+        let mut will_cfg = conn.mqtt.clone().unwrap();
+        will_cfg.client_id = format!("orbit-data-will-{}", now_ms());
+        will_cfg.will_topic = will_topic.clone();
+        will_cfg.will_payload = "goodbye".into();
+        will_cfg.will_qos = 1;
+        conn.id = "will-pub".into();
+        let opts = v3_options(&conn, &will_cfg).expect("遗嘱端参数失败");
+        let (client, mut eventloop) = AsyncClient::new(opts, 16);
+        let connected = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match eventloop.poll().await {
+                    Ok(EventV3::Incoming(PacketV3::ConnAck(_))) => return true,
+                    Ok(_) => {}
+                    Err(_) => return false,
+                }
+            }
+        })
+        .await
+        .unwrap_or(false);
+        assert!(connected, "遗嘱端未能连接");
+        drop(client);
+        drop(eventloop);
+
+        // 云 LB / NAT 可能延迟传播 FIN，放宽到 20 秒
+        let mut got = false;
+        for i in 0..200 {
+            if let Ok(page) = manager.page(&sub_id, 0) {
+                if page.messages.iter().any(|m| !m.sent && m.topic == will_topic && m.payload == "goodbye") {
+                    got = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if i % 100 == 99 {
+                eprintln!("遗嘱等待中，已等 {} 秒", (i + 1) / 10);
+            }
+        }
+        if !got {
+            if let Ok(page) = manager.page(&sub_id, 0) {
+                let seen: Vec<String> = page
+                    .messages
+                    .iter()
+                    .map(|m| format!("{}<{}|sent={}>", m.topic, m.payload, m.sent))
+                    .collect();
+                eprintln!("遗嘱等待超时，当前缓冲: {seen:?}，error={}", page.error);
+            }
+        }
+        assert!(got, "未收到遗嘱消息（topic={will_topic}）");
+        manager.disconnect(&sub_id);
+    }
+
+    /// MQTT 5 持久会话参数：clean_start=false + session_expiry 能正常建连
+    #[tokio::test]
+    async fn session_expiry_connect() {
+        let Some(mut conn) = test_conn("5.0") else { return; };
+        let cfg = conn.mqtt.as_mut().unwrap();
+        cfg.clean_start = false;
+        cfg.session_expiry_secs = 60;
+        cfg.client_id = format!("orbit-data-session-{}", std::process::id());
+        let manager = MqttManager::default();
+        let detail = connect(&manager, &conn).await.expect("持久会话连接失败");
+        assert!(detail.contains("MQTT 5.0"), "连接信息异常: {detail}");
+        manager.disconnect(&conn.id);
+    }
+
+    #[tokio::test]
+    async fn connect_test_api() {
+        let Some(conn) = test_conn("5.0") else { return; };
+        let detail = test(&conn).await.expect("test_connection 失败");
+        assert!(detail.contains("连接成功"), "返回信息异常: {detail}");
+    }
+
+    /// MQTT 5 用户属性：发布带属性，订阅端应收到相同属性
+    #[tokio::test]
+    async fn user_properties_roundtrip() {
+        let Some(conn) = test_conn("5.0") else { return; };
+        let manager = MqttManager::default();
+        connect(&manager, &conn).await.expect("连接失败");
+        let topic = format!("orbit-data/test/uprops/{}", now_ms());
+        manager.subscribe(&conn.id, &topic, 1, false, false, 0).await.expect("订阅失败");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let props = vec![
+            ("device".to_string(), "sensor-1".to_string()),
+            ("trace".to_string(), "t-42".to_string()),
+        ];
+        manager
+            .publish(&conn.id, &topic, 1, false, "with-props", "plaintext", props.clone())
+            .await
+            .expect("发布失败");
+        let got = wait_recv(&manager, &conn.id, |m| {
+            m.topic == topic && m.payload == "with-props" && m.user_properties == props
+        })
+        .await;
+        assert!(got, "未收到带用户属性的消息（topic={topic}）");
+        manager.disconnect(&conn.id);
+    }
+
+    /// No Local：本客户端发布的消息不再回显给自己
+    #[tokio::test]
+    async fn no_local_option() {
+        let Some(conn) = test_conn("5.0") else { return; };
+        let manager = MqttManager::default();
+        connect(&manager, &conn).await.expect("连接失败");
+        let topic = format!("orbit-data/test/nolocal/{}", now_ms());
+        manager.subscribe(&conn.id, &topic, 1, true, false, 0).await.expect("订阅失败");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        manager.publish(&conn.id, &topic, 1, false, "no-echo", "plaintext", Vec::new()).await.expect("发布失败");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let page = manager.page(&conn.id, 0).expect("读取消息失败");
+        let echoed = page.messages.iter().any(|m| !m.sent && m.topic == topic && m.payload == "no-echo");
+        assert!(!echoed, "No Local 订阅仍收到本机发布的回显");
+        manager.disconnect(&conn.id);
+    }
+
+    /// Retain Handling=Never：订阅已存在保留消息的主题时不投递缓存副本
+    #[tokio::test]
+    async fn retain_handling_never() {
+        let Some(conn) = test_conn("5.0") else { return; };
+        let manager = MqttManager::default();
+        connect(&manager, &conn).await.expect("连接失败");
+        let topic = format!("orbit-data/test/rhnever/{}", now_ms());
+        manager.publish(&conn.id, &topic, 1, true, "cached-retained", "plaintext", Vec::new()).await.expect("发布失败");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        manager.subscribe(&conn.id, &topic, 1, false, false, 2).await.expect("订阅失败");
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let page = manager.page(&conn.id, 0).expect("读取消息失败");
+        let delivered = page.messages.iter().any(|m| !m.sent && m.topic == topic);
+        assert!(!delivered, "Retain Handling=Never 仍收到保留消息");
+        manager.disconnect(&conn.id);
+    }
+
+    /// Retain As Published：带该选项的订阅可正常建立并收发
+    #[tokio::test]
+    async fn retain_as_published_option() {
+        let Some(conn) = test_conn("5.0") else { return; };
+        let manager = MqttManager::default();
+        connect(&manager, &conn).await.expect("连接失败");
+        let topic = format!("orbit-data/test/rap/{}", now_ms());
+        manager.subscribe(&conn.id, &topic, 1, false, true, 0).await.expect("订阅失败");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        manager.publish(&conn.id, &topic, 1, false, "rap-hello", "plaintext", Vec::new()).await.expect("发布失败");
+        let got = wait_recv(&manager, &conn.id, |m| m.topic == topic && m.payload == "rap-hello").await;
+        assert!(got, "rap 订阅未收到消息（topic={topic}）");
+        manager.disconnect(&conn.id);
+    }
+
+    #[test]
+    fn payload_decode_units() {
+        assert_eq!(from_hex("484558").unwrap(), b"HEX");
+        assert_eq!(from_hex("48 45\n58").unwrap(), b"HEX");
+        assert!(from_hex("484").is_err());
+        assert!(from_hex("zz").is_err());
+        assert_eq!(to_hex(b"HEX"), "484558");
+        assert_eq!(decode_payload("aGVsbG8=", "base64").unwrap(), b"hello");
+        assert!(decode_payload("!!", "base64").is_err());
+        assert_eq!(decode_payload("plain", "plaintext").unwrap(), b"plain");
+        assert_eq!(decode_payload("484558", "hex").unwrap(), b"HEX");
+    }
+
+    #[test]
+    fn address_and_qos_units() {
+        assert_eq!(clean_host("mqtts://127.0.0.1:1883/".strip_suffix(":1883/").unwrap()), "127.0.0.1");
+        assert_eq!(clean_host("  mqtt://example.com  "), "example.com");
+        let conn = Connection { host: "example.com".into(), port: 8083, ..Default::default() };
+        let ws = MqttConfig { protocol: "ws".into(), path: "mqtt".into(), ..Default::default() };
+        assert_eq!(broker_address(&conn, &ws).0, "ws://example.com:8083/mqtt");
+        let plain = MqttConfig { protocol: "mqtt".into(), ..Default::default() };
+        assert_eq!(broker_address(&conn, &plain), ("example.com".into(), 8083));
+        for q in [0u8, 1, 2] {
+            assert_eq!(qos_num(qos_of(q)), q);
+            assert_eq!(qos_num_v5(qos_of_v5(q)), q);
+        }
+    }
 }
 
 async fn poll_v3(mut eventloop: rumqttc::EventLoop, state: Arc<Mutex<ClientState>>) {
@@ -595,7 +1041,7 @@ async fn poll_v3(mut eventloop: rumqttc::EventLoop, state: Arc<Mutex<ClientState
                 st.error.clear();
             }
             Ok(EventV3::Incoming(PacketV3::Publish(p))) => {
-                record(&state, p.topic, p.payload.to_vec(), qos_num(p.qos), p.retain, false);
+                record(&state, p.topic, p.payload.to_vec(), qos_num(p.qos), p.retain, false, Vec::new());
             }
             Ok(EventV3::Incoming(PacketV3::Disconnect)) => {
                 state.lock().unwrap().connected = false;
@@ -623,7 +1069,12 @@ async fn poll_v5(mut eventloop: rumqttc::v5::EventLoop, state: Arc<Mutex<ClientS
             }
             Ok(rumqttc::v5::Event::Incoming(rumqttc::v5::mqttbytes::v5::Packet::Publish(p))) => {
                 let topic = String::from_utf8_lossy(&p.topic).to_string();
-                record(&state, topic, p.payload.to_vec(), qos_num_v5(p.qos), p.retain, false);
+                let user_properties = p
+                    .properties
+                    .as_ref()
+                    .map(|pr| pr.user_properties.clone())
+                    .unwrap_or_default();
+                record(&state, topic, p.payload.to_vec(), qos_num_v5(p.qos), p.retain, false, user_properties);
             }
             Ok(rumqttc::v5::Event::Incoming(rumqttc::v5::mqttbytes::v5::Packet::Disconnect(_))) => {
                 state.lock().unwrap().connected = false;

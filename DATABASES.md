@@ -100,7 +100,7 @@
 
 | 类型 | 标签 | 默认端口 | 后端 | 入口 | 菜单 | 状态 | 说明 |
 |---|---|---|---|---|---|---|---|
-| `mongodb` | MongoDB | 27017 | — | — | ✅ | 🔵 | 数据库 → 集合 → 字段（`$sample` 推断）；`caps.aggregate / sample` 待落地 |
+| `mongodb` | MongoDB | 27017 | ✅ | ✅ | ✅ | ✅ | 数据库 → 集合 → 字段（采样 50 篇文档推断）；JSON 命令 + shell 子集、TLS、聚合 / 统计 / 索引；导入导出待落地 |
 
 ### 3.6 `vector` — 向量
 
@@ -194,7 +194,7 @@ Kafka 本版本已实现功能（前后端编译检查通过，真实集群验�
 | 连接测试 / 保存 / 编辑 / 删除 / 分组 | ✅ | — |
 | 对象树：库 → 表/视图/键 → 列 | ✅ MySQL / PG / SQL Server / Redis | 其余类型 |
 | 查询执行 + 结果表格 + 图表 | ✅ MySQL / PG | Redis 走命令结果表格 |
-| 控制台模式 `console` | ✅ Redis | Mongo / InfluxDB / Prometheus / Neo4j / Nebula |
+| 控制台模式 `console` | ✅ Redis / MongoDB | InfluxDB / Prometheus / Neo4j / Nebula |
 | 预览前 100 行、查看结构、SELECT 模板、EXPLAIN、行计数 | ✅ MySQL / PG / SQL Server（`sql` 大类共用实现，SQL 按方言生成） | 其余 SQL 类型因无连接器不可用 |
 | 查看 / 导出 DDL `ddl` | ✅ MySQL（含视图）；`(查看结构)` PG | ClickHouse / Oracle 等方言 |
 | 新建数据库 / 新建表 `write` | ✅ MySQL / PG | 其余类型 |
@@ -203,7 +203,7 @@ Kafka 本版本已实现功能（前后端编译检查通过，真实集群验�
 | 列统计 `stats` | ⚪ 菜单灰显 | 全部类型 |
 | 分区 `partition` / 物化视图 `mv` / 索引 `index` | ⚪ 菜单灰显 | CK / Doris / Hive / PG |
 | 导出 CSV / DDL | ⚪ 菜单灰显 | 全部类型 |
-| 聚合管道 `aggregate` / 字段采样 `sample` | ⚪ | Mongo |
+| 聚合管道 `aggregate` / 字段采样 `sample` | ✅ MongoDB | 其余文档型 |
 | 向量检索 `vectorSearch` / 加载释放 `loadRelease` | ⚪ | Milvus / Qdrant |
 | 映射 `mapping` / 集群健康 `clusterHealth` | ⚪ | ES / OpenSearch |
 | 时间范围 `timeRange` / 保留策略 `retention` | ⚪ | InfluxDB / TDengine / TimescaleDB |

@@ -1,6 +1,6 @@
 # FEATURE.md — 功能清单与开发进度
 
-> 更新日期: 2026-11-12 · 版本: v0.1.9 · 右栏 SQL 编辑器调整：软换行 + 行号逐行对齐、按连接自动保存草稿、按连接归档 SQL 历史（新建 / 历史入口，支持单条删除）、运行 / 格式化按钮移至顶部数据库下拉右侧，移除「保存」按钮与已保存查询列表；此前新增的智能补全（关键字 / 库 / 表 / 列，候选来自当前连接的真实元数据）；OSS 对象浏览增强：图片 / 文本在线预览（可关闭）、修改时间区间筛选、整目录排序与分页跳页、搜索 / 排序 / 每页 / 时间单行「查询」、切换 Bucket 自动重置；此前 v0.1.8 的结果集单元格编辑、v0.1.7 的 ClickHouse 连接（HTTP 8123 / HTTPS 8443）、对象存储（阿里云 OSS）、MQTT、Kafka、SQL Server 状态保持不变
+> 更新日期: 2026-11-16 · 版本: v0.1.11 · 新增 SQLite 本地文件连接器（rusqlite / bundled，无需服务器；文件校验、表视图字段树、SELECT / PRAGMA / EXPLAIN / DDL / DML / 多语句脚本，`cargo test db::sqlite` 4 项通过，演示库与测试连接已保留，详见第 1.3 节）；此前 Milvus 连接器完成真实环境联调（HTTPS + 跳过证书校验 + 用户名密码鉴权，REST v2 全流程 5 项单测 + 端到端通过），集合右键新增「重命名集合」；此前 MongoDB 连接器（官方驱动、TLS、JSON 命令 / shell 子集、库集合字段元数据、doc 大类右键菜单，已通过真实环境联调）；六个根目录连接（OSS / ClickHouse / MySQL / Kafka / Elasticsearch / Redis）真实环境逐项回归并通过；补齐表级「索引与约束」「分区信息」、ES「集群健康」「分片 / 节点分布」；PostgreSQL 补齐跨 schema 表 / 视图 / 物化视图、列注释与完整类型、数组列展示，并修复限定名转义，新增 TLS 直连隧道以接入不支持 `SSLRequest` 协商的 TLS 终止型网关（真实环境联调通过）；修复 OSS 分页 `continuation-token` 未参与签名、ES 协议被 host 中残留 `https://` 覆盖的问题；此前右栏 SQL 编辑器调整（软换行 + 行号逐行对齐、按连接自动保存草稿、按连接归档 SQL 历史）、智能补全、OSS 对象浏览增强保持原样
 
 图例: [x] 已完成 · [~] 部分完成 · [ ] 规划中
 
@@ -8,15 +8,16 @@
 
 - [x] 新建/编辑/删除数据库连接(名称、主机、端口、用户名、密码、默认库、标识颜色)
 - [x] 新建/编辑连接对话框右侧「已实现功能」面板:随左侧连接类型切换,按功能维度(如列表搜索 / 对象操作 / 预览)聚合展示该类型真实落地的能力;窄窗口下收窄并可独立滚动,原有类型列表 / 表单 / 按钮布局不变(2026-11-12)
-- [x] 直接可用:MySQL、PostgreSQL、SQL Server、Redis、Elasticsearch、Kafka、MQTT、阿里云 OSS 八种类型具备后端连接器与创建入口
+- [x] 具备后端连接器与创建入口:MySQL、PostgreSQL、SQL Server、ClickHouse、Redis、Elasticsearch、Milvus、Kafka、MQTT、阿里云 OSS、SQLite；Milvus 已通过真实环境联调
 - [~] 国产 / 信创:达梦 DM、人大金仓 Kingbase、南大通用 GBase、神舟通用 Oscar(信创四大)+ PolarDB、openGauss 共 6 种仅完成能力注册表,后端无连接器、创建入口未开放;MySQL / PG 协议族类型可尝试用对应已支持类型连接(未验证),详见 [DATABASES.md](./DATABASES.md) 第 3.11 节
 - [x] Elasticsearch: HTTP/HTTPS（默认 HTTPS，可勾选跳过证书校验以适配自签证书 / 证书域名不匹配）、可选 Basic Auth、连接测试、索引直挂连接、嵌套 Mapping 与 multi-fields 浏览
-- [x] 通用 TLS 选项（2026-11-12）:MySQL / PostgreSQL / SQL Server / Redis 可启用 TLS 并选择是否跳过证书校验；Elasticsearch 可切换 HTTP / HTTPS；ClickHouse / 阿里云 OSS 在 HTTPS 下可跳过证书校验，适配 IP 证书与自签证书
-- [x] Elasticsearch: 只读 REST/JSON DSL 控制台、JSON 格式化、文档预览、Mapping/Settings、文档计数；搜索默认 500 条、上限 1000 条，聚合结果保留 JSON
+- [x] 通用 TLS 选项（2026-11-12）:MySQL / PostgreSQL / SQL Server / Redis 可启用 TLS 并选择是否跳过证书校验；Elasticsearch 可切换 HTTP / HTTPS（开关显式设置时优先于 host 中残留的协议前缀）；ClickHouse / 阿里云 OSS 在 HTTPS 下可跳过证书校验，适配 IP 证书与自签证书
+- [x] PostgreSQL TLS 直连隧道（2026-11-13）:标准 `SSLRequest` 协商被对端直接断开时（TLS 终止型代理 / 网关，先握手再直接收 `StartupMessage`），自动改由本机随机端口做 TCP → TLS 转发重试，用户无需额外配置；证书校验沿用「跳过证书校验」开关（关闭时用内置根证书校验证书链与 IP SAN）
+- [x] Elasticsearch: 只读 REST/JSON DSL 控制台、JSON 格式化、文档预览、Mapping/Settings、文档计数；搜索默认 500 条、上限 1000 条，聚合结果保留 JSON；库级「集群健康」(`_cluster/health`) 与「分片 / 节点分布」(`_cat/shards`，数组结果按列展开为表格)
 - [x] Elasticsearch: AI 生成 `elasticsearch` 请求代码块，可一键运行；不支持索引写操作、API Key、自定义 CA 或深分页
 - [x] 连接测试(保存前可验证)
 - [x] MySQL: SHOW DATABASES / SHOW FULL TABLES / SHOW FULL COLUMNS
-- [x] PostgreSQL: pg_database / information_schema(默认 public schema)
+- [x] PostgreSQL: `pg_database` 取库；`pg_class` 取全部用户 schema 的表 / 分区表 / 视图 / 物化视图（非当前 schema 以 `schema.table` 展示）；`pg_attribute` 取列（`format_type` 完整类型、主键、可空、`col_description` 注释）；数组列（text[] / int[] / float8[] / bool[]）按 JSON 数组展示（2026-11-13）
 - [x] Redis: SCAN 键列表(循环扫描直到游标归零,上限 1 万键)、任意命令执行
 - [x] SQL Server: `sys.databases` 取用户库(排除四个系统库)、`sys.objects` 取表 / 视图、`sys.columns` 取列(含长度 / 精度、主键、MS_Description 注释)
 - [x] SQL Server: 查询执行与方言适配(取前 N 行用 `TOP n`、执行计划用 `SET SHOWPLAN_ALL ON`、标识符按 `[name]` 转义、`schema.table` 限定名)
@@ -30,17 +31,50 @@
 - [x] 库级菜单(MySQL / PG):新建数据库…、新建表…(表设计窗口配置字段/主键/自增并预览 DDL,创建后刷新树)、删除库(DROP DATABASE,手输库名二次确认,成功后刷新树)
 - [x] 库级菜单(Redis):新建键…(窗口输入字符串值及可选 TTL,仅不存在时创建并刷新键列表)、清空当前逻辑库(SELECT + FLUSHDB,手输库号二次确认)
 - [~] Valkey / Dragonfly 等注册类型尚无后端连接器,创建入口暂不开放
-- [ ] 其余大类(Mongo / 向量 / 检索 / 时序 / 图)的新建与删除条目:ES 已有只读连接器，写操作与其他类型连接器仍未实现，菜单保持「规划中」灰显
+- [~] 其余大类(向量 / 检索 / 时序 / 图)的新建与删除条目:Milvus 已接入数据库 / 集合创建与删除；ES 已有只读连接器，其他类型尚未实现的条目保持「规划中」灰显
 - [x] 表级菜单(MySQL / PG / SQL Server):预览前 100 行、查看结构、SELECT 模板、执行计划(SQL Server 用 SHOWPLAN_ALL)、行计数、复制表名(SQL 按方言生成)
 - [x] MySQL 表/视图右键独立「查看 DDL」:使用 SHOW CREATE TABLE / VIEW，完整展示多行定义
 - [x] 表级菜单(Redis 键):查看值(按 TYPE 展开成表格:string 单值、hash 字段/值、list 序号/值、set 成员、zset 成员/分值、stream ID/字段,表头附类型与 TTL;HSCAN/SSCAN/ZSCAN 循环取数,上限 500 项)、查看 TTL、设置过期、重命名键、持久化、删除键
-- [~] 其余库级 / 表级条目(库概览、导出 DDL、导出 CSV、索引与约束、分区信息、写操作等):菜单中标注「规划中」
+- [x] 表级「索引与约束」「分区信息」已落地:MySQL / MariaDB / TiDB / OceanBase / Doris / StarRocks 用 `SHOW INDEX`、PostgreSQL / TimescaleDB 查 `pg_indexes`、SQL Server 查 `sys.indexes`、Oracle / DM 查 `all_indexes`、SQLite 用 `PRAGMA index_list`、DuckDB 查 `duckdb_indexes()`；分区信息支持 ClickHouse(`system.parts`)、Doris / StarRocks(`SHOW PARTITIONS`)、Hive(`SHOW PARTITIONS`)；不支持的类型菜单自动隐藏
+- [~] 其余库级 / 表级条目(库概览、导出 DDL、导出 CSV、各类写操作等):菜单中标注「规划中」
 - [x] 连接分组:连接配置 `group` 字段、左栏分组头(可折叠,组内缩进)、右键「移动到分组…」(留空移出分组)、折叠状态本地记忆
 - [x] 连接 / 断开:右键「连接 / 断开连接」、左栏状态点(绿=已连接)、断开后清空该连接元数据缓存、断开态执行 SQL 自动重连
 - [ ] SSH 隧道 / 通用数据库 SSL 连接参数（Kafka 专用 SSL / SASL 见第 8 节）
 - [x] ClickHouse: HTTP 接口（默认 8123，HTTPS 8443）、用户名 / 密码、`SELECT version()` 连接测试、对象树、SQL 执行、建库与建表设计器（详见第 11 节）
-- [ ] SQLite / MongoDB 连接器
+- [x] MongoDB 连接器（详见第 1.2 节）
 - [ ] 国产信创连接器:优先复用上游协议(PolarDB → MySQL 驱动,Kingbase / openGauss → PG 驱动),随后才是达梦 / GBase / Oscar 的独立方言适配
+
+## 1.1 Milvus 向量数据库（2026-11-12，v0.1.9）
+
+- [x] 新建 / 编辑 Milvus 连接：REST v2（默认 HTTP 19530）、HTTPS / 跳过证书校验、用户名密码或 Token、默认数据库；复用现有配置持久化与同步
+- [x] 对象树：数据库 → Collection → 字段，展示主键、类型与向量维度
+- [x] 复用控制台与结果表格：POST REST v2 / JSON operation 请求，标量过滤查询、向量检索、混合检索、按 ID 获取；嵌套向量以 JSON 展示，大整数结果保护
+- [x] 数据库 / 集合核心管理：创建、删除、重命名集合、集合 Schema / 统计 / 索引 / 加载状态、加载与释放；删除操作需名称确认
+- [x] 插入、Upsert、按过滤表达式删除，以及索引 / 分区管理 REST v2 控制台入口；请求模板供填写真实数据后执行
+- [x] 查询行数按调用方限制且最多 1000 条；HTTP / 业务错误统一提示，默认库为空时使用 `default`
+- [x] 真实环境联调通过（2026-11-16，TLS + 跳过证书校验 + 用户名密码）：连接测试、库 / 集合 / 字段元数据、建库建集合（Quick Setup）、插入 / Upsert / 按表达式删除、实体预览与按主键获取、加载轮询、向量检索与混合检索、索引 / 分区列表、统计、集合重命名与还原、释放 / 重新加载；`cargo test db::milvus` 5 项全部通过（凭据仅环境变量注入）；测试库 `orbitdata_test` 与集合 `orbitdata_demo`（2 行实体）已保留
+
+## 1.2 MongoDB 文档数据库（2026-11-13）
+
+- [x] 官方 Rust 驱动接入（`mongodb` 3.x，默认 rustls TLS）与 TLS / 跳过证书校验、账号密码（认证库默认 `admin`）
+- [x] 库 / 集合 / 字段元数据：字段由采样前 50 篇文档推断（嵌套路径展开 2 层），`_id` 标注主键
+- [x] 控制台双写法：JSON 命令（`{"find":"users","filter":{},"limit":20}`）与 shell 子集（`db.users.find({}).sort({...}).limit(20)`）；支持 Extended JSON 特殊类型
+- [x] 只读命令：find / count / aggregate / distinct / listIndexes / collStats / dbStats，游标自动 `getMore` 翻页并限制返回行数
+- [x] 写操作：insert / update / delete / create / drop / renameCollection 等经 JSON 命令执行，AI Agent 侧按只读 / 写入 / 危险三级分类
+- [x] 右键菜单按 `kind: "doc"` 大类落地：库级（聚合模板、新建 / 删除集合、统计）、集合级（预览文档、索引、计数、集合统计、重命名、清空、删除）
+- [~] 数据导入 / 导出条目保持「规划中」灰显
+- [x] 真实环境联调通过（TLS + 跳过证书校验 + `admin` 认证）：连接测试、库 / 集合 / 字段采样、shell 与 JSON 两种写法的 find / count / aggregate / distinct / listIndexes / collStats / dbStats、insert / update / delete / create / renameCollection / drop、250 条游标翻页；测试库 `orbitdata_test` 与 `orbitdata_json` 样本数据已保留
+- [~] `renameCollection` 需在 `admin` 库执行，已在驱动内自动切换；`collStats` 在新版 MongoDB 已废弃但仍可用，后续可切换为 `$collStats` 聚合
+
+## 1.3 SQLite 本地文件数据库（2026-11-16，v0.1.11）
+
+- [x] 本地文件型接入（`rusqlite` + bundled libsqlite3，无系统依赖）：无需服务器，`database` 字段存文件绝对路径（支持 `~/` 展开），「测试连接」即文件校验（不存在 / 是目录 / 非数据库文件均有明确报错）
+- [x] 新建 / 编辑连接对话框：类型列表新增 SQLite，表单为文件路径输入 + 系统文件选择器（`.db/.sqlite/.sqlite3/.db3`），隐藏主机 / 端口 / 用户名 / 密码 / TLS；按 `caps.localFile` 复用既有本地文件文案（校验文件 / 复制文件路径 / 复制 AI 上下文）
+- [x] 对象树：表 / 视图直挂连接（`sqlite_master`，过滤 `sqlite_%` 内部表），字段来自 `PRAGMA table_info`（类型、可空、主键 PRI）
+- [x] SQL 执行：SELECT / PRAGMA / EXPLAIN 返回结果表格（行数受调用方限制）；单条 DDL / DML 直接执行；多语句脚本按批处理整体执行；语法错误正常报错
+- [x] 方言菜单：查看结构用 `pragma_table_info()` 表值函数（SQLite 无 information_schema）、索引查看用 `PRAGMA index_list`、执行计划 `EXPLAIN SELECT`、预览 / 计数 / SELECT 模板走通用 SQL 能力位，菜单零新增分支
+- [x] 功能点验证通过（`cargo test db::sqlite` 4 项：文件校验与异常路径、表视图与列元数据、SELECT / LIMIT / NULL / PRAGMA / EXPLAIN、DDL / DML / 多语句脚本与错误处理）；演示库 `samples/orbitdata_demo.db`（2 表 1 视图 1 索引，3 用户 3 笔记）与连接「SQLite(本地测试)」已保留在应用配置目录
+- [~] 结果集单元格编辑提交（`editRows`）与新建表设计器未对 SQLite 开放，保持能力位关闭
 
 ## 2. AI 对话(核心)
 
@@ -55,11 +89,15 @@
 - [x] 对话级模型选择:中栏切换已配置模型,删除后回退默认模型
 - [x] SQL / Redis 命令代码块识别,支持「复制」与「一键运行」
 - [x] 轻量 Markdown 渲染(粗体、行内代码、代码块)
-- [x] 空状态快捷建议卡片(生成 SQL / 数据分析 / 优化建议 / 字段解释)
+- [x] 中栏去除欢迎提示 / 建议卡片 / 编辑器有内容提示，保持干净的对话时间线
 - [x] 对话历史随请求发送(最近消息)
-- [x] 历史会话本地持久化（浏览器本地存储）、历史列表切换与新建会话；关闭标签保留历史
+- [x] 历史会话本地持久化（浏览器本地存储）、历史列表切换与新建会话；关闭标签保留历史；空对话（新建后未提问）不写入历史列表
+- [x] 历史记录带连接 / 库 / 表上下文，点击会话时自动带入；SQL 历史同样回带上下文
+- [x] 历史会话面板位于右侧，条目右端带删除按钮、右键支持重命名 / 置顶 / 删除，面板顶部提供「全部清空」（同时清空历史 SQL，保留空白新对话）
+- [x] 中栏多子面板布局：标签页可拖拽到子面板的上 / 下 / 左 / 右 / 中间分屏（支持多级嵌套），分隔条拖动调整比例
+- [x] SQL 命令与 Agent 对话共用一个输入框，底部切换「SQL 命令 / Agent 模式」；SQL 模式保留关键字 / 库表列自动补全（⌘空格 手动触发、方向键选择、Enter/Tab 采纳），⌘/Ctrl+Enter 执行，查询结果以与对话同级的标签页打开而非新起一列
 - [x] 单气泡展示生成回复、用户消息复制与清空当前会话
-- [x] 会话首问自动命名、历史及当前标签右键置顶/删除；顶部图标操作
+- [x] 会话首问自动命名、历史及当前标签右键置顶 / 重命名 / 删除；顶部图标操作；双击对话标签可重命名（重命名后不再被首问覆盖）
 - [ ] 对话中引用表/字段(右键发送上下文)
 - [ ] AI 工具调用(自动执行 SQL 并基于结果回答,Agentic 模式)
 - [x] 停止生成按钮:生成中发送按钮变为停止(红色),点击后中断后端 SSE 读取并保留已生成内容,回答气泡标注「已中断」
@@ -75,7 +113,7 @@
 - [x] 模型连通性测试按钮:实际请求所选协议的模型,测试通过后才能保存;协议地址后缀提示
 - [ ] 按连接绑定专用模型
 
-## 4. SQL 编辑器(辅助窗口)
+## 4. SQL 编辑器(对话内嵌 + 可放大)
 
 - [x] 行号显示、等宽编辑区
 - [x] 软换行：长 SQL 按编辑器宽度换行，不再出现横向滚动条；行号按软换行后的实际高度逐行对齐
@@ -85,33 +123,31 @@
 - [x] 简易格式化(关键字大写 + 子句换行)
 - [x] 运行 / 格式化按钮位于顶部、数据库下拉框右侧（底部不再保留按钮栏）
 - [x] 数据库选择下拉
-- [x] 右栏仅保留编辑器本身：结果统一在中栏「查询结果」标签页展示（已移除右栏结果 / 可视化面板）
+- [x] 中栏不再有独立右栏：编辑器内嵌在对话面板，右上角放大图标打开弹窗编辑；结果统一在独立的结果子面板展示
+- [x] 历史 SQL 会话按连接 / 库 / 表归档，点击后自动恢复上下文并填入编辑器
 - [x] Redis 命令模式(直接执行 redis 命令)
 - [ ] 语法高亮(CodeMirror 6 按需引入)
 - [x] 智能补全(基于真实元数据):SQL 关键字 / 当前连接的库名 / 当前库表名 / 选中表与 SQL 引用表的列名；候选随当前连接与库实时拉取(30 秒缓存,失败不外造假数据),↑↓ 选择、Enter/Tab 采纳、Esc 关闭、Ctrl+Space 手动触发；仅关系型 / OLAP 连接启用(Redis、Elasticsearch 等命令控制台不启用)
 - [ ] 执行计划查看(EXPLAIN)
 
-## 5. 结果查看与可视化
+## 5. 结果查看
 
 - [x] 通用查询结果表格(列名、行号、NULL 识别、数值高亮)
 - [x] 结果统一展示在中栏「查询结果」标签页（无该标签时自动打开，已存在时复用并刷新）
 - [x] 执行耗时与行数统计(结果集上限 500 行)
-- [x] SVG 图表:自动识别分类列与数值列,柱状/折线切换,多系列
-- [ ] 悬浮 tooltip 与坐标缩放
 - [ ] CSV / Excel 导出
 - [x] 单元格编辑与提交(UPDATE 生成)：仅单表查询且主键列在结果中时可编辑，双击单元格修改、输入 NULL 设为空，提交时按主键批量生成 UPDATE；MySQL / PostgreSQL / SQL Server 在同一事务内提交，失败整体回滚；ClickHouse 使用 `ALTER TABLE … UPDATE`（`mutations_sync = 1`）逐行提交，适用于 MergeTree 系列表
 - [ ] 大结果集虚拟滚动
 
 ## 6. Git 同步
 
-- [x] 连接信息 + AI 模型配置导出为 `orbit-data-sync.json`
-- [x] 本地 Git 仓库初始化、提交
-- [x] 远程仓库推送 / 拉取(还原全部配置)
-- [x] 同步状态查看(分支、最新提交、待同步变更)
-- [x] 同步配置表单(仓库路径、远程 URL、分支)
-- [ ] 自动推送(auto_push 定时/变更触发)
+- [x] 连接信息 + AI 模型配置导出为 `orbit-data-sync.json`（不含 Git 凭据）
+- [x] 内置 git2（vendored libgit2）实现，不依赖系统安装的 git
+- [x] 单按钮同步：拉取远程 → 合并 → 提交推送；远程分支不存在时自动新建
+- [x] 同步配置表单（远程 URL、分支、用户名、密码/令牌、邮箱），测试连接成功后才能保存
+- [x] 同步冲突合并策略：按「主机 + 端口 + 名称」识别同一连接，冲突时选择保留远程或本地
+- [ ] 自动推送（定时/变更触发）
 - [ ] 敏感字段(密码)加密后再同步
-- [ ] 同步冲突合并策略
 
 ## 7. 工程与体积优化
 
@@ -143,25 +179,27 @@
 - [ ] Schema Registry、Avro / Protobuf 解码、OAuth / Kerberos、ACL 管理、分区重分配、RabbitMQ / RocketMQ / Pulsar 独立驱动
 - [ ] 真实 Kafka 集群联调与安全机制矩阵回归验证
 
-## 9. MQTT 消息工作区（v0.1.5，2026-11-02）
+## 9. MQTT 消息工作区（v0.1.7，2026-11-15）
 
-> 已用 MQTT 5.0 与 3.1.1 对测试 Broker 完成「连接 → 订阅 → 发布 → 接收」闭环验证（`cargo test`，凭据仅通过环境变量注入）。
+> 已用 MQTT 5.0 与 3.1.1 对私有测试 Broker 完成「连接 → 订阅 → 发布 → 接收」闭环验证（`cargo test`，凭据仅通过环境变量注入）。
+> 2026-11-15 对 mqtts 与 wss（路径 `/mqtt`）私有测试 Broker 完成全功能回归 16 项全部通过：双协议版本收发、QoS 0/1/2 矩阵、Retain 保留消息投递、`+` / `#` 通配符订阅、取消订阅停止投递、Base64 / Hex 编码发布、遗嘱消息触发、MQTT 5 持久会话参数、连接测试 API、系统证书校验与「跳过证书校验」两条 TLS 路径、MQTT 5 用户属性收发、No Local / Retain As Published / Retain Handling 订阅选项。
 
 - [x] 新增 MQTT 类型（`messaging` 大类）：协议 `mqtt` / `mqtts` / `ws` / `wss`、Client ID、用户名密码、Keep Alive、连接超时、Clean Start、会话过期间隔（5.0）、WebSocket 路径
-- [x] TLS：自定义 CA、客户端证书与私钥；留空使用系统信任证书。遗嘱消息：Topic / Payload / QoS / Retain
+- [x] TLS：自定义 CA、客户端证书与私钥；留空使用系统信任证书；mqtts / wss 可勾选「跳过证书校验」适配自签或 IP 证书（2026-11-15，勾选后客户端证书不生效）。遗嘱消息：Topic / Payload / QoS / Retain
 - [x] 连接测试与常驻会话：连接后后台保持客户端与消息缓冲，断开 / 编辑 / 删除连接时一并释放
 - [x] 订阅管理：批量主题（逗号分隔）、QoS、主题颜色、启用 / 禁用、删除；订阅与发布草稿按连接保存在本地
 - [x] 消息收发：增量轮询（500ms）、发送 / 接收方向标识、QoS / Retain / 时间 / 字节数、JSON 自动美化、Text / JSON / Hex 显示切换、复制 Payload
 - [x] 消息筛选：按订阅主题（支持 `+` / `#` 通配符）、按方向、按主题或内容搜索；清空当前显示；自动滚动开关
 - [x] 发布：Topic（历史订阅下拉）、QoS、Retain、Plaintext / JSON / Base64 / Hex Payload、`Cmd/Ctrl + Enter` 发送
-- [ ] mqtts / wss 自签证书跳过校验、MQTT 5 用户属性与订阅选项（No Local、Retain as Published、Retain Handling）、消息导出、Topic 树 / 仪表盘等视图器功能
+- [x] MQTT 5 用户属性（发布框每行 `key=value`，接收消息行展示属性）与订阅选项（No Local、Retain As Published、Retain Handling 0/1/2），仅 5.0 生效、随订阅持久化并在重连时恢复（2026-11-15，真实 Broker 验证）
+- [ ] 消息导出、Topic 树 / 仪表盘等视图器功能；3.1.1 的连接超时参数（rumqttc v3 无对应 API，沿用默认）
 
 ## 10. 对象存储 · 阿里云 OSS（v0.1.6，2026-11-10）
 
 > 详细说明见 [docs/data-sources/aliyun-oss.md](./docs/data-sources/aliyun-oss.md)。
 
 - [x] 新增第九大类 `storage` 与 `aliyun_oss` 类型：连接配置含 Endpoint、协议（https / http）、AccessKey ID / Secret、默认 Bucket、可选 STS Token
-- [x] 后端 `src-tauri/src/db/oss.rs`：OSS V1 签名（HMAC-SHA1）、HeadBucket / ListBuckets 连接测试、ListObjectsV2 前缀分页、HeadObject、DeleteObject、签名 URL、流式上传与下载
+- [x] 后端 `src-tauri/src/db/oss.rs`：OSS V1 签名（HMAC-SHA1）、HeadBucket / ListBuckets 连接测试、ListObjectsV2 前缀分页（`continuation-token` 参与签名，第二页起不再 403）、HeadObject、DeleteObject、签名 URL、流式上传与下载
 - [x] 左栏只展示 Bucket：双击连接或 Bucket 打开对象工作区；连接断开 / 编辑 / 删除时关闭对应标签页
 - [x] 中栏独立 `StorageWorkspace` 标签页：Bucket 切换、面包屑、前缀搜索、分页浏览（每页 50 / 100 / 200 / 500，支持首页 / 上一页 / 下一页 / 末页与输入页码跳转）
 - [x] 对象列表排序：名称 / 修改时间 × 正序 / 倒序，文件夹始终优先；由后端聚合整个目录后排序再切片分页，排序作用于完整列表
@@ -189,7 +227,7 @@
 - [x] 元数据查询使用 ClickHouse 参数占位符（`param_db` / `param_table`），不拼接用户输入
 - [x] SQL 执行：任意 SQL（含 DDL / DML），DDL 空响应视为成功；`UInt64` 等 64 位整数转字符串保精度，`Array / Map / Tuple` 转文本，非 JSON 结果回退为原文展示
 - [x] 兼容 ClickHouse 26.x 的 JSON 对象行输出（`data` 为以列名为 key 的对象）与旧版数组行输出
-- [x] 右键菜单：预览前 100 行、查看结构 / DDL（`SHOW CREATE TABLE`）、SELECT 模板、执行计划（`EXPLAIN`）、行计数、复制表名、刷新元数据等复用现有条目
+- [x] 右键菜单：预览前 100 行、查看结构 / DDL（`SHOW CREATE TABLE`）、SELECT 模板、执行计划（`EXPLAIN`）、行计数、分区信息（`system.parts`）、复制表名、刷新元数据等复用现有条目
 - [x] 建库：`CREATE DATABASE`（成功后刷新对象树）
 - [x] 建表设计器（ClickHouse 方言）：字段名 / 类型 / 长度精度 / 可空（`Nullable`）/ 默认值 / 注释，表级 Engine、`ORDER BY`、`PARTITION BY`、`PRIMARY KEY`、`TTL`
 - [x] 建表校验：控制字符、字段重复、`Decimal / FixedString / DateTime64` 长度格式、MergeTree 系列必须填写排序键
@@ -199,13 +237,13 @@
 
 ## 已知限制
 
-1. PostgreSQL 列信息暂未读取主键/注释(仅 schema/类型/可空)
+1. PostgreSQL 对象树为「数据库 → 表 / 视图 / 物化视图」两级，未提供独立 schema 分组节点；非当前 schema 的对象以 `schema.table` 平铺展示（普通表名含 `.` 时会被当作限定名）
 2. MySQL/PG 查询走预编译语句,部分特殊类型(如 GEOMETRY)显示为 16 进制
 3. 同步文件包含明文密码,务必使用私有仓库
 4. Redis 仅支持 SCAN 预览与命令执行,暂无键值编辑界面
-5. 右键菜单中标注「规划中」的条目尚未实现(库概览、导出 DDL / CSV、索引与分区、各类写操作等非 MySQL/PG/Redis 类型的菜单)
+5. 右键菜单中标注「规划中」的条目尚未实现(库概览、导出 DDL / CSV、各类写操作等非 MySQL/PG/Redis 类型的菜单)
 6. 数据库能力表目前由前端 `src/db/drivers.ts` 维护,后端 `capabilities` 命令待新增驱动时补齐
-7. Kafka 代码完成，前后端编译及二进制/i64 参数单测通过，真实集群联调待进行；Schema Registry、Avro / Protobuf、OAuth / Kerberos、ACL 管理、分区重分配未实现。每批读取最多 500 条 / 10 MiB / 256 个分区；消费组查询最多 2048 个分区；assignment 原始 hex。增量配置要求 Kafka 2.3+，位点重置要求 broker 支持 Admin API；水位差与 Lag 不等于精确消息条数
+7. Kafka 代码完成，前后端编译及二进制/i64 参数单测通过；已对 SASL_PLAINTEXT / PLAIN 真实集群完成元数据、建 Topic、生产、读取、消费组位点、动态配置与扩容分区联调（2026-11-13）；Schema Registry、Avro / Protobuf、OAuth / Kerberos、ACL 管理、分区重分配未实现。每批读取最多 500 条 / 10 MiB / 256 个分区；消费组查询最多 2048 个分区；assignment 原始 hex。增量配置要求 Kafka 2.3+，位点重置要求 broker 支持 Admin API；水位差与 Lag 不等于精确消息条数
 8. Kafka 新字段可选并使用 `serde(default)` 读取旧配置；旧版读写新配置可能丢字段。Git 同步含明文安全参数及文件路径，但不复制 CA / 证书 / 私钥文件；请使用私有仓库并在各设备单独部署证书
 9. Kafka 消息导出含业务内容，请保存到受控位置；有限时轮询监听并非永久后端订阅，停止后在途读取可完成但不继续发起新轮询
 10. SQL Server 仅支持 SQL Server 身份认证（用户名 / 密码），不支持 Windows 集成认证 / AAD 与命名实例（SQL Browser）；连接加密开启但不校验服务器证书，自签或内网证书可直接连上。不支持客户端 `GO` 分隔符，一次执行多条语句仅展示第一个结果集；TDS 8.0 严格模式与 Azure SQL 未验证

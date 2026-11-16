@@ -20,7 +20,9 @@
 | MySQL / PG：连接级「新建数据库…」、库级「新建表… / 删除库」 | 已实现 | 新建表使用设计窗口与 DDL 预览，走 `run_query` 后刷新树；危险项手输库名确认 |
 | Redis（kv）：库级「新建键… / 清空当前逻辑库」 | 已实现 | 新建键使用窗口输入字符串值/TTL，走 `redis_command` 后刷新树；其他注册的 kv 驱动尚无后端连接器 |
 | Elasticsearch：索引直挂连接、Mapping 字段、预览文档、Mapping/Settings、计数、DSL 控制台 | 已实现（2026-10-08） | 复用 `run_query`，能力位驱动，无库级节点；集群健康可在控制台查询 |
-| doc / vector / search / ts / graph 大类的新建 / 删除条目 | 未实现 | ES 已有只读连接器，写操作及其他类型连接器尚未实现，菜单保持「规划中」灰显 |
+| vector：Milvus 数据库 / Collection 核心操作（含集合重命名） | 已实现，真实环境联调通过（2026-11-16） | REST v2 接入；菜单按 `kind: vector` + `caps.console` / `write` 等能力位启用，集合浏览、Schema / 统计 / 索引、加载释放、重命名与读写模板复用控制台 |
+| doc：MongoDB 库级 / 集合级菜单 | 已实现（2026-11-13，含真实环境联调） | 驱动 `src-tauri/src/db/mongodb.rs`；菜单按 `kind: doc` + `caps.aggregate` / `sample` 等能力位启用，聚合模板、新建 / 删除集合、预览文档、索引、计数、集合统计、重命名、清空 |
+| search / ts / graph 及其他 vector 类型的新建 / 删除条目 | 未实现 | ES 已有只读连接器，其他类型未落地菜单保持「规划中」灰显 |
 | Redis：查看值（按 TYPE 展开为表格，5.2 条目）、TTL、设置过期、重命名键、持久化、删除键、刷新键列表、DBSIZE | 已实现 | 查看值走 `redis_key_view`（HSCAN / SSCAN / ZSCAN 循环 + LRANGE / XRANGE，上限 500 项），其余走 `redis_command` |
 | 标注「规划中」的条目 | 未实现 | 菜单灰显 + 「规划中」标签 |
 | Rust `db_capabilities` 命令（后端作为能力事实来源） | 未实现 | 前端注册表先行；待新增驱动时再迁移 |

@@ -21,6 +21,8 @@ export interface MqttConfig {
   ca_file: string;
   client_cert_file: string;
   client_key_file: string;
+  /** mqtts / wss 下跳过服务端证书校验（自签或 IP 证书场景） */
+  insecure_skip_verify: boolean;
   will_topic: string;
   will_payload: string;
   will_qos: 0 | 1 | 2;
@@ -49,7 +51,7 @@ export interface Connection {
   port: number;
   username: string;
   password: string;
-  /** SQL 默认数据库；Elasticsearch 默认索引 */
+  /** SQL / Milvus 默认数据库；Elasticsearch 默认索引 */
   database: string;
   color: string;
   /** 左栏分组名(空串表示未分组) */
@@ -75,6 +77,8 @@ export interface MqttMessage {
   /** true = 本机发布，false = 从 Broker 收到 */
   sent: boolean;
   ts: number;
+  /** MQTT 5 用户属性（3.1.1 恒为空） */
+  user_properties: [string, string][];
 }
 
 export interface MqttPage {
@@ -108,10 +112,25 @@ export interface ModelConfig {
 }
 
 export interface SyncConfig {
-  repo_path: string;
-  branch: string;
   remote_url: string;
-  auto_push: boolean;
+  /** 留空使用 main；远程不存在时自动新建 */
+  branch: string;
+  username: string;
+  password: string;
+  email: string;
+}
+
+/** 同步冲突：主机 + 端口 + 名称相同但其余配置不同 */
+export interface SyncConflict {
+  name: string;
+  host: string;
+  port: number;
+}
+
+export interface SyncOutcome {
+  needs_choice: boolean;
+  message: string;
+  conflicts: SyncConflict[];
 }
 
 export interface AppConfig {
@@ -129,7 +148,7 @@ export interface ChatMessage {
   /** Agent 步骤：待执行的命令 */
   command?: string;
   /** 命令类型(用于代码块标注) */
-  commandKind?: "sql" | "redis" | "elasticsearch";
+  commandKind?: "sql" | "redis" | "elasticsearch" | "milvus" | "mongodb";
   /** Agent 步骤状态 */
   status?: "thinking" | "pending" | "running" | "done" | "error" | "skipped" | "stopped";
   /** 需要用户确认的原因(写入 / 修改 / 删除等) */
@@ -236,6 +255,14 @@ export interface RedisKeyView {
   truncated: boolean;
 }
 
+/** 会话关联的数据库上下文，历史会话再次打开时自动回带 */
+export interface ChatContext {
+  connId: string;
+  database: string;
+  table: string;
+  column: string;
+}
+
 export interface ChatSession {
   id: string;
   title: string;
@@ -244,13 +271,39 @@ export interface ChatSession {
   pinned?: boolean;
   /** 当前对话选择的模型；未指定时使用默认模型 */
   modelId?: string;
+  /** 最近一次对话使用的连接 / 库 / 表，用于历史会话回带 */
+  context?: ChatContext;
 }
 
 export type Tab =
   | { id: string; kind: "chat"; sessionId: string; title: string }
   | { id: string; kind: "result"; title: string; result: QueryResult; edit?: ResultEditSource }
+  | { id: string; kind: "sql"; title: string }
   | { id: string; kind: "messaging"; title: string; connId: string; topic?: string }
   | { id: string; kind: "storage"; title: string; connId: string; bucket?: string; prefix?: string };
+
+/** 中间面板子面板：叶子节点承载一组标签页 */
+export interface PaneLeaf {
+  type: "leaf";
+  id: string;
+  tabIds: string[];
+  activeTabId: string;
+}
+
+/** 中间面板子面板：分栏节点，dir=row 左右排布，dir=col 上下排布 */
+export interface PaneSplit {
+  type: "split";
+  id: string;
+  dir: "row" | "col";
+  /** 各子节点占比，与 children 等长 */
+  sizes: number[];
+  children: PaneNode[];
+}
+
+export type PaneNode = PaneLeaf | PaneSplit;
+
+/** 标签拖拽到子面板时的落点区域 */
+export type DropZone = "center" | "left" | "right" | "up" | "down";
 
 /* ────────────────── 对象存储（阿里云 OSS） ────────────────── */
 

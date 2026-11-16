@@ -6,14 +6,21 @@ use std::time::{Duration, Instant};
 
 fn base_url(c: &Connection) -> Result<Url, String> {
     let host = c.host.trim();
-    // 未显式写协议时：TLS 关闭用 http，其余按 https（沿用 ES 8.x 默认开启 HTTP TLS 的行为）
-    let address = if host.contains("://") {
-        host.to_owned()
-    } else if c.tls == Some(false) {
-        format!("http://{host}")
+    let (explicit, rest) = if let Some(rest) = host.strip_prefix("http://") {
+        (Some("http"), rest)
+    } else if let Some(rest) = host.strip_prefix("https://") {
+        (Some("https"), rest)
     } else {
-        format!("https://{host}")
+        (None, host)
     };
+    // TLS 开关显式设置时以开关为准（连接弹窗里选中的协议），未设置时沿用 host 中写的协议，
+    // 都没有则按 https（ES 8.x 默认开启 HTTP TLS）。避免 host 里残留 https:// 时开关失效。
+    let scheme = match c.tls {
+        Some(true) => "https",
+        Some(false) => "http",
+        None => explicit.unwrap_or("https"),
+    };
+    let address = format!("{scheme}://{rest}");
     let mut url = Url::parse(&address).map_err(|_| "ES 主机地址无效".to_string())?;
     if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
         || !url.username().is_empty() || url.password().is_some()
@@ -178,6 +185,25 @@ fn query_result(value: Value, limit: usize, duration_ms: u64) -> QueryResult {
             let mut row = vec![Value::Null; result.columns.len()];
             *row.last_mut().unwrap() = Value::String(value.to_string());
             result.rows.push(row);
+        }
+    } else if let Some(items) = value.as_array() {
+        // _cat/* 接口返回对象数组，按列展开为表格
+        let mut columns: Vec<String> = Vec::new();
+        for item in items.iter().take(limit) {
+            if let Some(obj) = item.as_object() {
+                for key in obj.keys() {
+                    if !columns.contains(key) { columns.push(key.clone()); }
+                }
+            }
+        }
+        if columns.is_empty() {
+            result.columns = vec!["response".into()];
+            result.rows = vec![vec![Value::String(serde_json::to_string_pretty(&value).unwrap_or_default())]];
+        } else {
+            result.rows = items.iter().take(limit)
+                .map(|item| columns.iter().map(|key| cell(&item[key])).collect())
+                .collect();
+            result.columns = columns;
         }
     } else {
         result.columns = vec!["response".into()];

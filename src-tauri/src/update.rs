@@ -22,6 +22,8 @@ pub const UPDATE_PROGRESS_EVENT: &str = "update:progress";
 
 /// 更新检查总超时：并行探测所有更新源，最长等待 5 秒。
 const CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+/// 外层兜底超时略大于单请求超时，避免恰好 5 秒返回的成功结果被外层提前丢弃。
+const TOTAL_TIMEOUT: Duration = Duration::from_millis(5_500);
 
 /// 所有更新源都不可用时的提示。
 const TIMEOUT_MESSAGE: &str = "更新检查失败：网络超时，请检查网络后重试";
@@ -99,7 +101,7 @@ async fn probe_endpoints_ordered(app: &AppHandle) -> Result<Vec<(Version, Url)>,
         }
     });
 
-    let results = tokio::time::timeout(CHECK_TIMEOUT, join_all(probes))
+    let results = tokio::time::timeout(TOTAL_TIMEOUT, join_all(probes))
         .await
         .map_err(|_| TIMEOUT_MESSAGE.to_string())?;
 

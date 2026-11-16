@@ -10,6 +10,10 @@ interface Sub {
   qos: number;
   color: string;
   enabled: boolean;
+  /** MQTT 5 订阅选项：No Local / Retain As Published / Retain Handling(0|1|2) */
+  no_local?: boolean;
+  rap?: boolean;
+  rh?: number;
 }
 
 type Direction = "all" | "received" | "sent";
@@ -22,11 +26,24 @@ interface Draft {
   retain: boolean;
   format: PayloadFormat;
   payload: string;
+  /** MQTT 5 用户属性，每行 key=value */
+  user_props: string;
 }
 
 const PALETTE = ["#ff8c42", "#3b82f6", "#22c55e", "#a855f7", "#ef4444", "#14b8a6", "#eab308", "#ec4899"];
 
-const emptyDraft = (): Draft => ({ topic: "", qos: 0, retain: false, format: "plaintext", payload: "" });
+const emptyDraft = (): Draft => ({ topic: "", qos: 0, retain: false, format: "plaintext", payload: "", user_props: "" });
+
+/** 把每行 key=value 的文本解析为用户属性对 */
+const parseUserProps = (text: string): [string, string][] =>
+  text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .map((l) => {
+      const i = l.indexOf("=");
+      return i < 0 ? ([l, ""] as [string, string]) : ([l.slice(0, i), l.slice(i + 1)] as [string, string]);
+    });
 
 const SUBS_KEY = (id: string) => `orbit-data.mqtt.subs.${id}`;
 const DRAFT_KEY = (id: string) => `orbit-data.mqtt.draft.${id}`;
@@ -91,7 +108,7 @@ export function MqttWorkspace({ connId }: { connId: string }) {
   const cfg: MqttConfig = connection?.mqtt ?? {
     protocol: "mqtt", client_id: "", mqtt_version: "5.0", keep_alive_secs: 60,
     clean_start: true, session_expiry_secs: 0, connection_timeout_secs: 10, path: "/mqtt",
-    ca_file: "", client_cert_file: "", client_key_file: "",
+    ca_file: "", client_cert_file: "", client_key_file: "", insecure_skip_verify: false,
     will_topic: "", will_payload: "", will_qos: 0, will_retain: false,
   };
 
@@ -111,6 +128,10 @@ export function MqttWorkspace({ connId }: { connId: string }) {
   const [subOpen, setSubOpen] = useState(false);
   const [subTopic, setSubTopic] = useState("");
   const [subQos, setSubQos] = useState(0);
+  const [subNoLocal, setSubNoLocal] = useState(false);
+  const [subRap, setSubRap] = useState(false);
+  const [subRh, setSubRh] = useState(0);
+  const isV5 = cfg.mqtt_version === "5.0";
 
   const sinceRef = useRef(0);
   const listRef = useRef<HTMLDivElement>(null);
@@ -135,7 +156,7 @@ export function MqttWorkspace({ connId }: { connId: string }) {
     }
     setStatus((s) => ({ ...s, connected: true }));
     subs.filter((s) => s.enabled && !subscribedRef.current.has(s.topic)).forEach((s) => {
-      void api.mqttSubscribe(connId, s.topic, s.qos)
+      void api.mqttSubscribe(connId, s.topic, s.qos, s.no_local ?? false, s.rap ?? false, s.rh ?? 0)
         .then(() => subscribedRef.current.add(s.topic))
         .catch((e) => showToast(`订阅 ${s.topic} 失败: ${e}`));
     });
@@ -157,7 +178,7 @@ export function MqttWorkspace({ connId }: { connId: string }) {
         } else if (!wasConnectedRef.current) {
           subscribedRef.current.clear();
           subsRef.current.filter((s) => s.enabled).forEach((s) => {
-            void api.mqttSubscribe(connId, s.topic, s.qos)
+            void api.mqttSubscribe(connId, s.topic, s.qos, s.no_local ?? false, s.rap ?? false, s.rh ?? 0)
               .then(() => subscribedRef.current.add(s.topic))
               .catch((e) => showToast(`重新订阅 ${s.topic} 失败: ${e}`));
           });
@@ -206,10 +227,13 @@ export function MqttWorkspace({ connId }: { connId: string }) {
     const next = [...subs];
     for (const topic of topics) {
       if (next.some((s) => s.topic === topic)) continue;
-      next.push({ topic, qos: subQos, color: PALETTE[next.length % PALETTE.length], enabled: true });
+      next.push({
+        topic, qos: subQos, color: PALETTE[next.length % PALETTE.length], enabled: true,
+        no_local: subNoLocal, rap: subRap, rh: subRh,
+      });
       if (session) {
         try {
-          await api.mqttSubscribe(connId, topic, subQos);
+          await api.mqttSubscribe(connId, topic, subQos, subNoLocal, subRap, subRh);
           subscribedRef.current.add(topic);
         } catch (e) {
           showToast(`订阅 ${topic} 失败: ${e}`);
@@ -233,7 +257,7 @@ export function MqttWorkspace({ connId }: { connId: string }) {
     setSubs((prev) => prev.map((s) => (s.topic === sub.topic ? { ...s, enabled } : s)));
     if (!session) return;
     if (enabled) {
-      await api.mqttSubscribe(connId, sub.topic, sub.qos)
+      await api.mqttSubscribe(connId, sub.topic, sub.qos, sub.no_local ?? false, sub.rap ?? false, sub.rh ?? 0)
         .then(() => subscribedRef.current.add(sub.topic))
         .catch((e) => showToast(`订阅失败: ${e}`));
     } else {
@@ -249,7 +273,8 @@ export function MqttWorkspace({ connId }: { connId: string }) {
     }
     setSending(true);
     try {
-      await api.mqttPublish(connId, draft.topic.trim(), draft.qos, draft.retain, draft.payload, draft.format);
+      const props = isV5 ? parseUserProps(draft.user_props) : [];
+      await api.mqttPublish(connId, draft.topic.trim(), draft.qos, draft.retain, draft.payload, draft.format, props);
       showToast("已发布");
     } catch (e) {
       showToast(`发布失败: ${e}`);
@@ -394,6 +419,11 @@ export function MqttWorkspace({ connId }: { connId: string }) {
                   <span className="mqtt-msg-size">{m.size} B</span>
                   <button className="mqtt-mini" title="复制 Payload" onClick={() => void copy(m.payload)}>复制</button>
                 </div>
+                {m.user_properties.length > 0 && (
+                  <div className="mqtt-msg-props" title="MQTT 5 用户属性">
+                    {m.user_properties.map(([k, v]) => `${k}=${v}`).join(" · ")}
+                  </div>
+                )}
                 <pre className="mqtt-msg-payload">{formatPayload(m, viewFormat)}</pre>
               </div>
             ))}
@@ -439,6 +469,14 @@ export function MqttWorkspace({ connId }: { connId: string }) {
                 }
               }}
             />
+            {isV5 && (
+              <input
+                className="mqtt-props-input"
+                value={draft.user_props}
+                placeholder="用户属性（每行 key=value，仅 MQTT 5.0）"
+                onChange={(e) => setDraft({ ...draft, user_props: e.target.value })}
+              />
+            )}
           </div>
         </section>
       </div>
@@ -465,8 +503,31 @@ export function MqttWorkspace({ connId }: { connId: string }) {
               <select value={subQos} onChange={(e) => setSubQos(Number(e.target.value))}>
                 {[0, 1, 2].map((q) => <option key={q} value={q}>QoS {q}</option>)}
               </select>
+              {isV5 && (
+                <>
+                  <label>订阅选项</label>
+                  <div className="mqtt-sub-options">
+                    <label className="mqtt-check">
+                      <input type="checkbox" checked={subNoLocal} onChange={(e) => setSubNoLocal(e.target.checked)} />
+                      No Local（不接收本客户端发布的回显）
+                    </label>
+                    <label className="mqtt-check">
+                      <input type="checkbox" checked={subRap} onChange={(e) => setSubRap(e.target.checked)} />
+                      Retain As Published（保留消息保持 Retain 标志）
+                    </label>
+                    <label className="mqtt-check inline">
+                      Retain Handling
+                      <select value={subRh} onChange={(e) => setSubRh(Number(e.target.value))}>
+                        <option value={0}>0 订阅时总是发送</option>
+                        <option value={1}>1 仅新订阅发送</option>
+                        <option value={2}>2 不发送保留消息</option>
+                      </select>
+                    </label>
+                  </div>
+                </>
+              )}
               <label>说明</label>
-              <span className="mqtt-hint">支持 MQTT 通配符 + 与 #；取消勾选「启用」可临时停止接收。</span>
+              <span className="mqtt-hint">支持 MQTT 通配符 + 与 #；取消勾选「启用」可临时停止接收。订阅选项仅 MQTT 5.0 生效。</span>
             </div>
             <div className="modal-actions">
               <div className="spacer" />

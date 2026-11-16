@@ -6,6 +6,9 @@ import type { UpdateInfo } from "../types";
 /** 下载进度事件名，与 Rust 侧 update.rs 的 UPDATE_PROGRESS_EVENT 保持一致。 */
 const PROGRESS_EVENT = "update:progress";
 
+/** 「启动时自动检查更新」开关的本地存储键；值为 "off" 时跳过启动检查 */
+export const AUTO_CHECK_UPDATE_KEY = "orbit-data-auto-check-update";
+
 interface ProgressPayload {
   chunk: number;
   total: number | null;
@@ -27,6 +30,10 @@ export default function AutoUpdateBanner() {
   const [dismissed, setDismissed] = useState(false);
 
   useEffect(() => {
+    if (localStorage.getItem(AUTO_CHECK_UPDATE_KEY) === "off") {
+      setChecking(false);
+      return;
+    }
     let alive = true;
     api
       .updateCheck()

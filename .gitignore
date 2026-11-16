@@ -6,3 +6,4 @@ src-tauri/target
 config.json
 orbit-data-sync.json
 .env*
+.trae-html-share-packages/

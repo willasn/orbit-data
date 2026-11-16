@@ -1,8 +1,7 @@
 import { useEffect } from "react";
 import { useStore } from "./store";
 import LeftPanel from "./components/LeftPanel";
-import MainArea from "./components/ChatView";
-import SqlEditorPanel from "./components/SqlEditorPanel";
+import MainArea from "./components/MainArea";
 import SettingsView from "./components/SettingsView";
 import ConnectionDialog from "./components/ConnectionDialog";
 import CreateObjectDialog from "./components/CreateObjectDialog";
@@ -11,18 +10,7 @@ import PanelResizer from "./components/PanelResizer";
 import AutoUpdateBanner from "./components/AutoUpdateBanner";
 
 export default function App() {
-  const {
-    init,
-    view,
-    showLeft,
-    showRight,
-    leftWidth,
-    rightWidth,
-    setPaneWidth,
-    toast,
-    createTarget,
-  } = useStore();
-  const activeTabKind = useStore((s) => s.tabs.find((t) => t.id === s.activeTabId)?.kind);
+  const { init, view, showLeft, leftWidth, setPaneWidth, toast, createTarget } = useStore();
 
   useEffect(() => {
     init().catch((e) => console.error("初始化失败", e));
@@ -37,10 +25,6 @@ export default function App() {
             <PanelResizer side="left" width={leftWidth} onResize={(w) => setPaneWidth("left", w)} />
           )}
           <MainArea />
-          {showRight && (
-            <PanelResizer side="right" width={rightWidth} onResize={(w) => setPaneWidth("right", w)} />
-          )}
-          {showRight && <SqlEditorPanel disabled={activeTabKind === "messaging" || activeTabKind === "storage"} />}
         </div>
       ) : (
         <SettingsView />

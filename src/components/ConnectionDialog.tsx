@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { open as pickFile } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import { useStore } from "../store";
 import DbTypeIcon from "./DbTypeIcon";
@@ -30,7 +31,7 @@ const DEFAULT_MQTT = (): MqttConfig => ({
   protocol: "mqtt", client_id: newClientId(), mqtt_version: "5.0",
   keep_alive_secs: 60, clean_start: true, session_expiry_secs: 0,
   connection_timeout_secs: 10, path: "/mqtt",
-  ca_file: "", client_cert_file: "", client_key_file: "",
+  ca_file: "", client_cert_file: "", client_key_file: "", insecure_skip_verify: false,
   will_topic: "", will_payload: "", will_qos: 0, will_retain: false,
 });
 
@@ -67,6 +68,16 @@ const TYPE_META = [
     ],
   },
   {
+    key: "sqlite", label: "SQLite", desc: "本地文件数据库 · 无需服务器",
+    features: [
+      { title: "连接", items: ["本地文件选择", "文件校验（无需网络）"] },
+      { title: "数据浏览", items: ["对象树（表 / 视图 / 字段直挂连接）", "预览前 100 行", "行计数"] },
+      { title: "查询", items: ["SQL 查询", "DDL / DML 执行", "多语句脚本", "执行计划（EXPLAIN）"] },
+      { title: "结构", items: ["查看结构（PRAGMA table_info）", "索引查看（PRAGMA index_list）"] },
+      { title: "辅助", items: ["SELECT 模板", "复制文件路径", "复制为 AI 上下文"] },
+    ],
+  },
+  {
     key: "clickhouse", label: "ClickHouse", desc: "列式 OLAP · 高性能分析查询",
     features: [
       { title: "查询与编辑", items: ["SQL 查询（HTTP 接口）", "结果表格", "单元格编辑（ALTER TABLE UPDATE）"] },
@@ -85,6 +96,26 @@ const TYPE_META = [
       { title: "过期时间", items: ["TTL 查看", "设置过期"] },
       { title: "控制台", items: ["任意命令执行"] },
       { title: "辅助", items: ["连接测试", "TLS / 跳过证书校验"] },
+    ],
+  },
+  {
+    key: "milvus", label: "Milvus", desc: "向量数据库 · REST v2",
+    features: [
+      { title: "数据浏览", items: ["数据库 / Collection / 字段", "主键与向量维度", "实体预览与计数"] },
+      { title: "检索", items: ["标量过滤查询", "向量相似度检索", "混合检索", "结果表格"] },
+      { title: "管理", items: ["创建 / 删除数据库与集合", "重命名集合", "加载 / 释放集合", "索引与分区管理"] },
+      { title: "写入", items: ["JSON 插入 / Upsert / 删除控制台"] },
+      { title: "连接", items: ["HTTP / HTTPS", "用户名密码 / Token", "连接测试"] },
+    ],
+  },
+  {
+    key: "mongodb", label: "MongoDB", desc: "文档数据库 · JSON 命令 / shell 子集",
+    features: [
+      { title: "数据浏览", items: ["数据库 / 集合 / 字段（采样推断）", "文档预览", "计数"] },
+      { title: "查询", items: ["JSON 命令控制台", "shell 子集（find / aggregate 链式）", "JSON 格式化", "游标自动翻页"] },
+      { title: "管理", items: ["新建 / 删除集合", "重命名集合", "清空集合", "列表与规范删除"] },
+      { title: "统计", items: ["集合统计（collStats）", "数据库统计（dbStats）", "索引查看"] },
+      { title: "连接", items: ["TLS / 跳过证书校验", "账号密码认证", "连接测试"] },
     ],
   },
   {
@@ -125,7 +156,7 @@ const TYPE_META = [
       { title: "消息收发", items: ["增量轮询、方向标识、QoS / Retain、JSON 美化、Text / JSON / Hex"] },
       { title: "消息筛选", items: ["主题通配符、方向、关键词"] },
       { title: "发布", items: ["QoS / Retain、Plaintext / JSON / Base64 / Hex"] },
-      { title: "连接", items: ["TLS（CA / 客户端证书 / 私钥）、遗嘱消息、MQTT 5.0 / 3.1.1、WebSocket 路径、连接测试"] },
+      { title: "连接", items: ["TLS（CA / 客户端证书 / 私钥 / 跳过校验）、遗嘱消息、MQTT 5.0 / 3.1.1、WebSocket 路径、连接测试"] },
     ],
   },
 ] as const;
@@ -172,13 +203,16 @@ export default function ConnectionDialog() {
     setTestResult("");
     setForm((f) => {
       if (f.db_type === t) return f;
-      // Kafka / ES 不需要用户名密码与默认库；MQTT 复用 username / password 做 Broker 认证
-      const clearAuth = driverOf(t).caps.mapping || t === "kafka";
+      // 切换 Kafka / ES / 向量类型时清空其他驱动的认证信息与默认库。
+      const clearAuth = driverOf(t).caps.mapping || driverOf(t).kind === "vector" || t === "kafka";
       return {
         ...f,
         db_type: t,
         port: defaultPortOf(t),
         ...(clearAuth ? { username: "", password: "", database: "" } : {}),
+        // 本地文件型用 database 存文件路径，与主机型互斥时清空
+        ...(driverOf(t).caps.localFile ? { username: "", password: "", database: "" } : {}),
+        ...(driverOf(f.db_type).caps.localFile && !driverOf(t).caps.localFile ? { database: "" } : {}),
         ...(t === "mqtt" && f.host === "127.0.0.1" ? { host: "" } : {}),
         ...(t === "aliyun_oss" ? { host: "oss-cn-hangzhou.aliyuncs.com", port: 443 } : {}),
         ...(f.db_type === "aliyun_oss" && t !== "aliyun_oss" && f.host.endsWith(".aliyuncs.com")
@@ -193,7 +227,21 @@ export default function ConnectionDialog() {
   };
   const isOss = form.db_type === "aliyun_oss";
   const isClickhouse = form.db_type === "clickhouse";
+  /** 本地文件型（SQLite / DuckDB）：database 字段存文件路径，无主机 / 端口 / 认证 */
+  const isLocalFile = driverOf(form.db_type).caps.localFile;
+  const pickLocalFile = async () => {
+    const path = await pickFile({
+      multiple: false,
+      title: "选择数据库文件",
+      filters: [{ name: "SQLite 数据库", extensions: ["db", "sqlite", "sqlite3", "db3"] }],
+    });
+    if (typeof path === "string") {
+      setTestResult("");
+      setForm((f) => ({ ...f, database: path }));
+    }
+  };
   const isEs = form.db_type === "elasticsearch";
+  const isMilvus = form.db_type === "milvus";
   const oss = form.oss ?? DEFAULT_OSS;
   const clickhouse = form.clickhouse ?? DEFAULT_CLICKHOUSE;
   const messaging = driverOf(form.db_type).caps.messaging;
@@ -300,7 +348,21 @@ export default function ConnectionDialog() {
                 onChange={(e) => setForm({ ...form, name: e.target.value })}
                 placeholder="例如 MySQL(生产)"
               />
-              {isKafka ? (
+              {isLocalFile ? (
+                <>
+                  <label>数据库文件 *</label>
+                  <span className="conn-file-row">
+                    <input
+                      value={form.database}
+                      placeholder="本机文件路径，如 ~/data/app.db（文件需已存在）"
+                      onChange={(e) => { setTestResult(""); setForm({ ...form, database: e.target.value }); }}
+                    />
+                    <button className="btn" onClick={pickLocalFile}>浏览…</button>
+                  </span>
+                  <label>说明</label>
+                  <span>SQLite 是本地文件数据库，无需启动任何服务；新文件可在终端执行 <code>sqlite3 路径.db</code> 创建。</span>
+                </>
+              ) : isKafka ? (
                 <>
                   <label>Bootstrap Servers *</label>
                   <textarea rows={3} value={kafka.bootstrap_servers.join("\n")}
@@ -397,7 +459,7 @@ export default function ConnectionDialog() {
               ) : <>
                 <label>主机 *</label>
                 <input value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })}
-                  placeholder={driverOf(form.db_type).caps.mapping ? "主机名或 http(s)://主机（默认 https）" : "主机名"} />
+                  placeholder={isMilvus ? "主机名或 http(s)://主机（REST v2，默认 http）" : driverOf(form.db_type).caps.mapping ? "主机名或 http(s)://主机（默认 https）" : "主机名"} />
                 <label>端口 *</label>
                 <input type="number" value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} />
                 {showTlsToggle && (
@@ -406,7 +468,7 @@ export default function ConnectionDialog() {
                     <label className="conn-check">
                       <input type="checkbox" checked={tlsEnabled}
                         onChange={(e) => setTls(e.target.checked)} />
-                      {isEs ? "使用 HTTPS 加密连接" : "启用 TLS 加密连接"}
+                      {isEs || isMilvus ? "使用 HTTPS 加密连接" : "启用 TLS 加密连接"}
                     </label>
                     {tlsEnabled && skipVerifyControl}
                   </>
@@ -473,6 +535,12 @@ export default function ConnectionDialog() {
                       <input value={mqtt.client_cert_file} onChange={(e) => setMqtt({ client_cert_file: e.target.value })} />
                       <label>客户端私钥</label>
                       <input value={mqtt.client_key_file} onChange={(e) => setMqtt({ client_key_file: e.target.value })} />
+                      <label>证书校验</label>
+                      <label className="conn-check">
+                        <input type="checkbox" checked={mqtt.insecure_skip_verify}
+                          onChange={(e) => setMqtt({ insecure_skip_verify: e.target.checked })} />
+                        跳过校验（自签证书或 IP 证书不匹配时勾选）
+                      </label>
                     </>
                   )}
                   <label>遗嘱 Topic</label>
@@ -494,11 +562,11 @@ export default function ConnectionDialog() {
                   <span>配置含明文凭据；Git 同步请使用私有仓库。证书文件不会同步。</span>
                 </>
               )}
-              {!messaging && !isOss && form.db_type !== "redis" && (
+              {!messaging && !isOss && !isLocalFile && form.db_type !== "redis" && (
                 <>
                   <label>用户名</label>
-                  <input value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
-                  <label>密码</label>
+                  <input value={form.username} placeholder={isMilvus ? "无认证或使用 Token 时留空" : undefined} onChange={(e) => setForm({ ...form, username: e.target.value })} />
+                  <label>{isMilvus ? "密码 / Token" : "密码"}</label>
                   <input
                     type="password"
                     value={form.password}
@@ -508,7 +576,7 @@ export default function ConnectionDialog() {
                   <input
                     value={form.database}
                     onChange={(e) => setForm({ ...form, database: e.target.value })}
-                    placeholder="可选"
+                    placeholder={isMilvus ? "可选，留空使用 default" : "可选"}
                   />
                 </>
               )}
@@ -555,7 +623,7 @@ export default function ConnectionDialog() {
               <button className="btn" onClick={closeDialog}>取消</button>
               <button
                 className="btn primary"
-                disabled={testing || !form.name.trim() || (isKafka ? !kafka.bootstrap_servers.some((s) => s.trim()) : !form.host || (isOss && (!form.username.trim() || !form.password)))}
+                disabled={testing || !form.name.trim() || (isKafka ? !kafka.bootstrap_servers.some((s) => s.trim()) : isLocalFile ? !form.database.trim() : !form.host || (isOss && (!form.username.trim() || !form.password)))}
                 onClick={async () => {
                   await saveConnection({
                     ...form,

@@ -39,6 +39,8 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 futures-util = "0.3"
 # 更新源版本比较（GitHub Releases / R2 两个 latest.json 取较大者）
 semver = "1"
+# Git 同步：内置 libgit2（vendored），不依赖系统安装的 git
+git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "https"] }
 urlencoding = "2"
 rust_decimal = "1"
 uuid = "1"
@@ -47,11 +49,18 @@ rumqttc = { version = "0.25.1", features = ["websocket"] }
 # 显式指定 rustls 加密后端：依赖图中 ring 与 aws-lc-rs 同时启用时，
 # 未安装进程级 Provider 会让 TlsConfiguration::default() 直接 panic
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# PostgreSQL TLS 直连隧道：TLS 终止型网关不支持标准 SSLRequest 协商时使用
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1"
 base64 = "0.22"
 # 阿里云 OSS：V1 签名（HMAC-SHA1）
 hmac = "0.12"
 sha1 = "0.10"
 mime_guess = "2"
+# MongoDB：官方驱动，默认启用 rustls TLS
+mongodb = "3.10"
+# SQLite：本地文件型嵌入式数据库，bundled 内置编译 libsqlite3，无需系统依赖
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [profile.dev]
 # 自己的代码保留 file:line(panic 回溯可用),但去掉变量级调试信息,大幅减小体积

@@ -123,8 +123,9 @@ fn gmt_now() -> String {
 }
 
 /// 只有 OSS 定义的子资源才参与签名；prefix / delimiter / max-keys /
-/// list-type / continuation-token 等普通查询参数不参与 CanonicalizedResource。
-const SIGNED_SUBRESOURCES: &[&str] = &["security-token"];
+/// list-type 等普通查询参数不参与 CanonicalizedResource。
+/// 注意 continuation-token 属于签名子资源，分页第二页起必须参与签名，否则 403 SignatureDoesNotMatch。
+const SIGNED_SUBRESOURCES: &[&str] = &["security-token", "continuation-token"];
 
 fn canonical_query(params: &[(String, String)], signed_only: bool) -> String {
     let mut pairs: Vec<String> = params

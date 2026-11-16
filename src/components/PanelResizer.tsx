@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 const LIMITS: Record<"left" | "right", [number, number]> = {
   left: [180, 560],
-  right: [260, 760],
+  right: [360, 760],
 };
 
 interface Props {
@@ -47,7 +47,7 @@ export default function PanelResizer({ side, width, onResize }: Props) {
         setDragging(false);
       }}
       onPointerCancel={() => setDragging(false)}
-      onDoubleClick={() => onResize(side === "left" ? 264 : 372)}
+      onDoubleClick={() => onResize(side === "left" ? 264 : 460)}
     />
   );
 }

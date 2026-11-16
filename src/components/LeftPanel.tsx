@@ -11,7 +11,6 @@ import {
   Radio,
   Loader2,
   PanelLeft,
-  PanelRight,
   Settings,
 } from "lucide-react";
 import { useStore } from "../store";
@@ -28,7 +27,6 @@ export default function LeftPanel() {
     view,
     setView,
     showLeft,
-    showRight,
     togglePanel,
     leftWidth,
     activeConnId,
@@ -78,13 +76,6 @@ export default function LeftPanel() {
         onClick={() => togglePanel("left")}
       >
         <PanelLeft size={15} />
-      </button>
-      <button
-        className={`footer-btn${showRight ? " active" : ""}`}
-        title={showRight ? "收起右栏" : "展开右栏"}
-        onClick={() => togglePanel("right")}
-      >
-        <PanelRight size={15} />
       </button>
       <button
         className={`footer-btn${view === "settings" ? " active" : ""}`}
@@ -306,7 +297,16 @@ export default function LeftPanel() {
                                     <div
                                       className={`tree-row indent${driver.caps.databases ? 2 : 1}${tOpen ? " open" : ""}`}
                                       onClick={() => selectTable(c.id, db, t.name)}
-                                      onDoubleClick={driver.caps.browseMessages ? () => void useStore.getState().openMessaging(c.id, t.name) : undefined}
+                                      onDoubleClick={driver.caps.browseMessages
+                                        ? () => void useStore.getState().openMessaging(c.id, t.name)
+                                        : driver.kind === "vector" && driver.caps.console
+                                          ? () => {
+                                              void (async () => {
+                                                await useStore.getState().selectChatContext(c.id, db, t.name);
+                                                await useStore.getState().runSql(`POST /v2/vectordb/entities/query\n${JSON.stringify({ collectionName: t.name, filter: "", outputFields: ["*"], limit: 100 }, null, 2)}`);
+                                              })();
+                                            }
+                                          : undefined}
                                       onContextMenu={(e) =>
                                         openMenu(e, {
                                           kind: "table",

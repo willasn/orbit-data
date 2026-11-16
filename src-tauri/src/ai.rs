@@ -1,5 +1,6 @@
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::Mutex;
 
 use crate::config::{ModelConfig, ModelProtocol};
@@ -457,6 +458,12 @@ fn agent_system_prompt(db_type: &str) -> String {
         "elasticsearch" => lines.push(
             "当前环境是 Elasticsearch：command 第一行为 METHOD + 相对路径（如 POST /index/_search），下一行放 JSON DSL；只允许 _search、_count、_mapping、_settings、_cluster/health 等只读接口。".to_string(),
         ),
+        "milvus" => lines.push(
+            "当前环境是 Milvus：禁止生成 SQL。command 首行为 POST /v2/vectordb/operation，换行后填写 JSON 对象，例如 POST /v2/vectordb/entities/query 换行后填写 {\"collectionName\":\"实际集合名\",\"filter\":\"\",\"outputFields\":[\"*\"],\"limit\":100}；也支持含 operation 字段的 JSON 对象。使用上下文中的数据库和集合名；未知字段先查询 collections/describe，向量搜索必须使用真实向量。读取使用 entities/query、entities/search、entities/hybrid_search、entities/get 及只读元数据接口，写入、删除、创建、加载或释放等操作必须等待用户确认。查询使用 limit 限制结果；最终展示可执行代码块时使用 milvus 语言标记。".to_string(),
+        ),
+        "mongodb" => lines.push(
+            "当前环境是 MongoDB：禁止生成 SQL。command 为单个 JSON 命令对象，例如 {\"find\":\"集合名\",\"filter\":{},\"limit\":20}；也支持 shell 写法 db.集合名.find({}).limit(20)。使用上下文中的数据库与集合名；不确定集合有哪些字段时先执行 {\"listCollections\":1} 或用 find 采样再决定。读取使用 find、aggregate、count、distinct、listIndexes、listCollections、collStats、dbStats；插入、更新、删除、建集合、建索引、重命名、drop 等操作会先请求用户确认。对象/日期等特殊值用 Extended JSON（如 {\"$oid\":\"...\"}、{\"$date\":\"...\"}）；查询尽量带 limit；最终展示可执行代码块时使用 json 语言标记。".to_string(),
+        ),
         "mysql" | "postgres" | "sqlserver" | "clickhouse" => {
             let label = match db_type {
                 "mysql" => "MySQL",
@@ -632,6 +639,8 @@ fn classify_command(db_type: &str, command: &str) -> Verdict {
     match db_type {
         "redis" => classify_redis(command),
         "elasticsearch" => classify_es(command),
+        "milvus" => classify_milvus(command),
+        "mongodb" => classify_mongo(command),
         _ => classify_sql(command),
     }
 }
@@ -717,6 +726,87 @@ fn classify_redis(command: &str) -> Verdict {
         return Verdict::safe();
     }
     Verdict::auth("执行未知或不常用的 Redis 命令")
+}
+
+fn classify_milvus(command: &str) -> Verdict {
+    let text = command.trim();
+    // 与执行器使用相同请求格式解析，仅精确匹配只读操作，未知请求必须确认。
+    let operation = if text.starts_with('{') {
+        serde_json::from_str::<Value>(text).ok().and_then(|body| {
+            body.as_object()?.get("operation")?.as_str().map(str::to_owned)
+        })
+    } else {
+        let split = text.find('{').unwrap_or(text.len());
+        let parts: Vec<_> = text[..split].split_whitespace().collect();
+        let valid_body = split == text.len()
+            || serde_json::from_str::<Value>(&text[split..]).is_ok_and(|body| body.is_object());
+        if parts.len() == 2 && parts[0].eq_ignore_ascii_case("POST") && valid_body {
+            parts[1].strip_prefix("/v2/vectordb/").map(str::to_owned)
+        } else {
+            None
+        }
+    };
+    match operation.as_deref() {
+        Some("databases/list" | "databases/describe"
+            | "collections/list" | "collections/describe" | "collections/get_stats" | "collections/get_load_state"
+            | "entities/query" | "entities/search" | "entities/hybrid_search" | "entities/get"
+            | "indexes/list" | "indexes/describe"
+            | "partitions/list" | "partitions/has" | "partitions/get_stats") => Verdict::safe(),
+        Some("databases/drop" | "collections/drop" | "entities/delete" | "indexes/drop" | "partitions/drop") => {
+            Verdict::destructive("删除 Milvus 数据或数据库对象")
+        }
+        _ => Verdict::auth("写入、修改 Milvus 状态或执行未知请求"),
+    }
+}
+
+fn classify_mongo(command: &str) -> Verdict {
+    let Some(operation) = mongo_operation(command) else {
+        return Verdict::auth("无法识别的 MongoDB 命令");
+    };
+    let op = operation.to_ascii_lowercase();
+    let reads = [
+        "find", "findone", "count", "countdocuments", "aggregate", "distinct", "getindexes",
+        "listindexes", "listcollections", "listdatabases", "collstats", "dbstats", "explain",
+        "stats", "hello", "ismaster", "buildinfo", "serverstatus", "getmore",
+    ];
+    let drops = ["drop", "dropdatabase", "dropindexes"];
+    let writes = [
+        "insert", "insertone", "insertmany", "update", "updateone", "updatemany", "replaceone",
+        "delete", "deletemany", "deleteone", "findandmodify", "findoneandupdate",
+        "findoneanddelete", "findoneandreplace", "create", "createindex", "createindexes",
+        "renamecollection", "rename", "compact", "setparametersoncollection",
+    ];
+    if drops.contains(&op.as_str()) {
+        return Verdict::destructive("删除 MongoDB 数据库 / 集合 / 索引");
+    }
+    if op == "delete" {
+        return Verdict::destructive("删除 MongoDB 文档");
+    }
+    if writes.contains(&op.as_str()) {
+        return Verdict::auth("写入或修改 MongoDB 数据或集合结构");
+    }
+    if reads.contains(&op.as_str()) {
+        return Verdict::safe();
+    }
+    Verdict::auth("执行未知或不常用的 MongoDB 命令")
+}
+
+/** 取 MongoDB 命令的操作名：JSON 命令取首个键，shell 写法取集合后的首个方法名 */
+fn mongo_operation(command: &str) -> Option<String> {
+    let text = command.trim();
+    if text.starts_with('{') {
+        let value: Value = serde_json::from_str(text).ok()?;
+        return value.as_object()?.keys().next().cloned();
+    }
+    let mut rest = text.strip_prefix("db.")?;
+    if rest.starts_with("getCollection(") {
+        let close = rest.find(')')?;
+        rest = rest[close + 1..].strip_prefix('.')?;
+    } else if let Some((_, after)) = rest.split_once('.') {
+        rest = after;
+    }
+    let name = rest.split('(').next()?.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 fn classify_es(command: &str) -> Verdict {

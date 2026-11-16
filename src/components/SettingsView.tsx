@@ -1,8 +1,19 @@
-import { useState } from "react";
-import { ArrowLeft, Plus, Trash2, Star, RefreshCw, UploadCloud, DownloadCloud, GitBranch, Bot } from "lucide-react";
+import { useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
+import { ArrowLeft, Plus, Trash2, Star, RefreshCw, Save, Zap, GitBranch, Bot, Check, Info } from "lucide-react";
 import { api } from "../api";
 import { useStore } from "../store";
-import type { ModelConfig, SyncConfig } from "../types";
+import { AUTO_CHECK_UPDATE_KEY } from "./AutoUpdateBanner";
+import type { ModelConfig, SyncConfig, UpdateInfo } from "../types";
+
+/** 下载进度事件名，与 Rust 侧 update.rs 的 UPDATE_PROGRESS_EVENT 保持一致。 */
+const PROGRESS_EVENT = "update:progress";
+
+interface ProgressPayload {
+  chunk: number;
+  total: number | null;
+}
 
 const blankModel = (): ModelConfig => ({
   id: "",
@@ -16,16 +27,40 @@ const blankModel = (): ModelConfig => ({
   supports_images: false,
 });
 
+const blankSync = (): SyncConfig => ({
+  remote_url: "",
+  branch: "",
+  username: "",
+  password: "",
+  email: "",
+});
+
 export default function SettingsView() {
   const { config, setView, showToast, init, askConfirm } = useStore();
   const [editing, setEditing] = useState<ModelConfig | null>(null);
-  const [syncForm, setSyncForm] = useState<SyncConfig>(
-    () => config?.sync ?? { repo_path: "", branch: "", remote_url: "", auto_push: false }
-  );
+  const [syncForm, setSyncForm] = useState<SyncConfig>(() => config?.sync ?? blankSync());
+  const [testedKey, setTestedKey] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [version, setVersion] = useState("");
+  const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
+  const [updatePercent, setUpdatePercent] = useState<number | null>(null);
+  const [updateError, setUpdateError] = useState("");
+  const [autoCheck, setAutoCheck] = useState(
+    () => localStorage.getItem(AUTO_CHECK_UPDATE_KEY) !== "off"
+  );
+
+  useEffect(() => {
+    void getVersion().then(setVersion).catch(() => {});
+  }, []);
 
   const models = config?.models ?? [];
+  const formKey = JSON.stringify(syncForm);
+  const savedKey = JSON.stringify(config?.sync ?? blankSync());
+  const formValid = [syncForm.remote_url, syncForm.username, syncForm.password, syncForm.email]
+    .every((value) => !!value.trim());
 
   const updateSync = async (fn: () => Promise<unknown>, ok: string) => {
     setBusy(true);
@@ -38,6 +73,136 @@ export default function SettingsView() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const testSync = async () => {
+    if (!formValid) {
+      showToast("请先填写远程仓库 URL、用户名、密码与邮箱");
+      return;
+    }
+    setBusy(true);
+    try {
+      const message = await api.syncTest(syncForm);
+      setTestedKey(formKey);
+      setStatus(message);
+      showToast(message);
+    } catch (e) {
+      setTestedKey("");
+      setStatus(`${e}`);
+      showToast(`${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveSync = async () => {
+    if (formKey !== testedKey) {
+      showToast("请先测试连接，测试成功后才能保存");
+      return;
+    }
+    setBusy(true);
+    try {
+      await saveSyncForm(syncForm);
+      await init();
+      showToast("同步配置已保存");
+    } catch (e) {
+      showToast(`${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const runSync = async () => {
+    if (formKey !== savedKey) {
+      showToast("请先测试连接并保存同步配置");
+      return;
+    }
+    setBusy(true);
+    setStatus("");
+    try {
+      let outcome = await api.syncNow();
+      if (outcome.needs_choice) {
+        const list = outcome.conflicts
+          .map((item) => `· ${item.name}（${item.host}:${item.port}）`)
+          .join("\n");
+        const keepRemote = await askConfirm({
+          title: "同步冲突",
+          message: `以下连接在本地与远程的配置不同：\n${list}\n\n选择「保留远程」将使用远程配置并推送；取消则保留本地配置并推送。`,
+          confirmText: "保留远程",
+        });
+        outcome = await api.syncNow(keepRemote ? "remote" : "local");
+      }
+      setStatus(outcome.message);
+      showToast(outcome.message);
+      await init();
+    } catch (e) {
+      setStatus(`${e}`);
+      showToast(`${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const checkUpdate = async () => {
+    setUpdateChecking(true);
+    setUpdateError("");
+    setUpdateInfo(null);
+    try {
+      setUpdateInfo(await api.updateCheck());
+    } catch (e) {
+      setUpdateError(`${e}`);
+    } finally {
+      setUpdateChecking(false);
+    }
+  };
+
+  const installUpdate = async () => {
+    setUpdateInstalling(true);
+    setUpdatePercent(0);
+    setUpdateError("");
+    let downloaded = 0;
+    let total: number | null = null;
+    const off = await listen<ProgressPayload>(PROGRESS_EVENT, (ev) => {
+      downloaded += Number(ev.payload?.chunk || 0);
+      total = ev.payload?.total ?? total;
+      setUpdatePercent(total ? Math.min(100, Math.round((downloaded / total) * 100)) : null);
+    });
+    try {
+      await api.updateInstall();
+      off();
+    } catch (e) {
+      off();
+      setUpdateInstalling(false);
+      setUpdateError(`${e}`);
+    }
+  };
+
+  const updateStatus = updateInstalling
+    ? updatePercent === null
+      ? "正在下载…"
+      : `正在下载 ${updatePercent}%`
+    : updateError ||
+      (updateChecking
+        ? "正在检查更新…"
+        : updateInfo
+          ? updateInfo.has_update
+            ? `发现新版本 ${updateInfo.latest}（当前 ${updateInfo.current}）${
+                updateInfo.notes ? `\n${updateInfo.notes}` : ""
+              }`
+            : `当前已是最新版本（${updateInfo.current}）`
+          : "尚未检查更新");
+
+  const updateStatusKind = updateError
+    ? "error"
+    : updateInfo
+      ? updateInfo.has_update
+        ? "new"
+        : "ok"
+      : "";
+
+  const toggleAutoCheck = (checked: boolean) => {
+    setAutoCheck(checked);
+    localStorage.setItem(AUTO_CHECK_UPDATE_KEY, checked ? "on" : "off");
   };
 
   return (
@@ -56,6 +221,50 @@ export default function SettingsView() {
           <h1>偏好设置</h1>
           <p>管理 AI 模型与多设备配置同步</p>
         </div>
+        <section className="settings-card about-card">
+          <div className="card-title">
+            <span className="card-title-label"><span className="settings-icon"><Info size={18} /></span>关于与更新</span>
+          </div>
+          <div className="about-row">
+            <div className="about-main">
+              <div className="about-version">
+                当前版本 <strong>{version || "—"}</strong>
+              </div>
+              <div className={`about-status${updateStatusKind ? ` ${updateStatusKind}` : ""}`}>
+                {updateStatus}
+              </div>
+            </div>
+            <div className="about-actions">
+              {updateInfo?.has_update && (
+                <button
+                  className="btn primary"
+                  disabled={updateInstalling}
+                  onClick={() => void installUpdate()}
+                >
+                  {updateInstalling ? "下载中" : "立即更新"}
+                </button>
+              )}
+              <button
+                className="btn"
+                disabled={updateChecking || updateInstalling}
+                onClick={() => void checkUpdate()}
+              >
+                {updateChecking ? "检查中" : "检查更新"}
+              </button>
+            </div>
+          </div>
+          <div className="about-row about-switch-row">
+            <span>启动时自动检查更新</span>
+            <label className="about-switch">
+              <input
+                type="checkbox"
+                checked={autoCheck}
+                onChange={(e) => toggleAutoCheck(e.target.checked)}
+              />
+              <span className="about-switch-box"><Check size={12} strokeWidth={3} /></span>
+            </label>
+          </div>
+        </section>
         <section className="settings-card">
           <div className="card-title">
             <span className="card-title-label"><span className="settings-icon"><Bot size={18} /></span>AI 模型</span>
@@ -128,50 +337,55 @@ export default function SettingsView() {
             将数据库连接与 AI 模型配置同步到 Git 仓库，实现多设备共享。配置包含敏感信息，请使用私有仓库。
           </p>
           <div className="form-grid settings-sync-form">
-            <label>本地仓库路径</label>
-            <input
-              value={syncForm.repo_path}
-              onChange={(e) => setSyncForm({ ...syncForm, repo_path: e.target.value })}
-              placeholder="选择或输入本地私有仓库路径"
-            />
             <label>远程仓库 URL</label>
             <input
               value={syncForm.remote_url}
               onChange={(e) => setSyncForm({ ...syncForm, remote_url: e.target.value })}
-              placeholder="远程私有仓库地址（可选）"
+              placeholder="https://github.com/your-user/your-repo.git"
             />
             <label>分支</label>
             <input
               value={syncForm.branch}
               onChange={(e) => setSyncForm({ ...syncForm, branch: e.target.value })}
-              placeholder="留空使用默认分支"
+              placeholder="留空使用 main，不存在时自动新建"
+            />
+            <label>用户名</label>
+            <input
+              value={syncForm.username}
+              onChange={(e) => setSyncForm({ ...syncForm, username: e.target.value })}
+              placeholder="Git 用户名或账号"
+            />
+            <label>密码 / 访问令牌</label>
+            <input
+              type="password"
+              value={syncForm.password}
+              onChange={(e) => setSyncForm({ ...syncForm, password: e.target.value })}
+              placeholder="Git 密码或访问令牌"
+            />
+            <label>邮箱</label>
+            <input
+              value={syncForm.email}
+              onChange={(e) => setSyncForm({ ...syncForm, email: e.target.value })}
+              placeholder="提交作者邮箱"
             />
           </div>
           <div className="sync-actions">
-            <button className="btn" disabled={busy} onClick={() => updateSync(async () => {
-              await saveSyncForm(syncForm);
-              await init();
-              await api.syncInit();
-            }, "同步仓库已初始化")}>
-              <RefreshCw size={13} /> 初始化仓库
+            <button className="btn" disabled={busy || !formValid} onClick={() => void testSync()}>
+              <Zap size={13} /> 测试连接
             </button>
-            <button className="btn primary" disabled={busy} onClick={() => updateSync(async () => {
-              await saveSyncForm(syncForm);
-              await api.syncCommit("sync: 手动同步");
-            }, "已提交并推送")}>
-              <UploadCloud size={13} /> 提交并推送
+            <button
+              className="btn"
+              disabled={busy || !formValid || formKey !== testedKey}
+              onClick={() => void saveSync()}
+            >
+              <Save size={13} /> 保存
             </button>
-            <button className="btn" disabled={busy} onClick={() => updateSync(async () => {
-              await api.syncPull();
-              await init();
-            }, "已拉取并应用远程配置")}>
-              <DownloadCloud size={13} /> 拉取同步
-            </button>
-            <button className="btn" disabled={busy} onClick={() => updateSync(async () => {
-              const s = await api.syncStatus();
-              setStatus(s);
-            }, "")}>
-              查看状态
+            <button
+              className="btn primary"
+              disabled={busy || formKey !== savedKey}
+              onClick={() => void runSync()}
+            >
+              <RefreshCw size={13} /> 同步
             </button>
           </div>
           {status && <pre className="sync-status">{status}</pre>}

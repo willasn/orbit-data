@@ -203,8 +203,11 @@ async fn mqtt_subscribe(
     conn_id: String,
     topic: String,
     qos: u8,
+    no_local: bool,
+    retain_as_published: bool,
+    retain_handling: u8,
 ) -> Result<(), String> {
-    mqtt.subscribe(&conn_id, &topic, qos).await
+    mqtt.subscribe(&conn_id, &topic, qos, no_local, retain_as_published, retain_handling).await
 }
 
 #[tauri::command]
@@ -225,8 +228,9 @@ async fn mqtt_publish(
     retain: bool,
     payload: String,
     format: String,
+    user_properties: Vec<(String, String)>,
 ) -> Result<(), String> {
-    mqtt.publish(&conn_id, &topic, qos, retain, &payload, &format).await
+    mqtt.publish(&conn_id, &topic, qos, retain, &payload, &format, user_properties).await
 }
 
 #[tauri::command]
@@ -351,29 +355,21 @@ fn save_sync_config(state: tauri::State<ConfigStore>, sync: config::SyncConfig) 
 }
 
 #[tauri::command]
-fn sync_init(state: tauri::State<ConfigStore>) -> Result<String, String> {
-    let cfg = state.read()?;
-    gitsync::init(&cfg.sync)
+fn sync_test(sync: config::SyncConfig) -> Result<String, String> {
+    gitsync::test(&sync)
 }
 
 #[tauri::command]
-fn sync_commit(state: tauri::State<ConfigStore>, message: String) -> Result<String, String> {
+fn sync_now(
+    state: tauri::State<ConfigStore>,
+    resolution: Option<String>,
+) -> Result<gitsync::SyncOutcome, String> {
     let cfg = state.read()?;
-    gitsync::commit_and_push(&cfg, &cfg.sync, &message)
-}
-
-#[tauri::command]
-fn sync_pull(state: tauri::State<ConfigStore>) -> Result<AppConfig, String> {
-    let cfg = state.read()?;
-    let imported = gitsync::pull(&cfg.sync)?;
-    state.write(&imported)?;
-    Ok(imported)
-}
-
-#[tauri::command]
-fn sync_status(state: tauri::State<ConfigStore>) -> Result<String, String> {
-    let cfg = state.read()?;
-    gitsync::status(&cfg.sync)
+    let (merged, outcome) = gitsync::sync_now(&cfg, &state.sync_repo_dir(), resolution.as_deref())?;
+    if !outcome.needs_choice {
+        state.write(&merged)?;
+    }
+    Ok(outcome)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -428,10 +424,8 @@ pub fn run() {
             ai_cancel,
             ai_agent_step,
             save_sync_config,
-            sync_init,
-            sync_commit,
-            sync_pull,
-            sync_status,
+            sync_test,
+            sync_now,
             update::update_check,
             update::update_install,
         ])

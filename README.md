@@ -7,14 +7,13 @@ OrbitData 的设计思想参考原生 AI IDE(如 Trae):**以 AI 对话为主要�
 ## 特性一览
 
 - **对话驱动**:内置 AI 助手,自动感知当前连接与数据库上下文,生成的 SQL 可一键"运行"
-- **多连接管理**:直接可用 MySQL / PostgreSQL / SQL Server / ClickHouse / Redis / Elasticsearch / Kafka / MQTT / 阿里云 OSS,树状浏览数据库 → 表/视图 → 字段；ES 为连接 → 索引 → Mapping 字段,Kafka 为连接 → Topic,MQTT 为连接 → 订阅主题与收发消息,OSS 为连接 → Bucket（对象在独立工作区浏览）；ClickHouse 为连接 → 数据库 → 表/视图/物化视图 → 字段,走 HTTP 接口
+- **多连接管理**:直接可用 MySQL / PostgreSQL / SQL Server / ClickHouse / Redis / Elasticsearch / Kafka / MQTT / 阿里云 OSS / SQLite,树状浏览数据库 → 表/视图 → 字段；ES 为连接 → 索引 → Mapping 字段,Kafka 为连接 → Topic,MQTT 为连接 → 订阅主题与收发消息,OSS 为连接 → Bucket（对象在独立工作区浏览）；ClickHouse 为连接 → 数据库 → 表/视图/物化视图 → 字段,走 HTTP 接口；SQLite 为本地文件型,连接即选择本机 `.db` 文件,表/视图直挂连接,无需任何服务器
 - **国产 / 信创登记**:达梦、人大金仓 Kingbase、南大通用 GBase、神舟通用 Oscar(信创四大)以及 PolarDB、openGauss 共 6 种已登记能力(端口 / 层级 / 菜单),后端连接器尚未实现;PolarDB 可按 MySQL 类型、Kingbase / openGauss 可按 PostgreSQL 类型填实际端口连接(未验证),详见 [DATABASES.md](./DATABASES.md) 第 3.11 节
 - **Kafka 消息工作区（实现中）**:新增 `messaging` 第八大类，Topic 直挂连接；专用标签页浏览集群与消息、生产消息、管理 Topic 和 Consumer Group。RabbitMQ / RocketMQ / Pulsar 仅作为大类代表，尚未实施
 - **MQTT 消息工作区**:连接级订阅主题、收发消息与发布，支持 MQTT 5.0 / 3.1.1、TCP / TLS / WebSocket、遗嘱消息与常见 Payload 格式；右键连接或双击连接即可打开
 - **阿里云 OSS 对象存储（第九大类 `storage`）**:Endpoint + AccessKey / STS 连接，左栏只展示 Bucket，中栏对象工作区支持前缀浏览、名称 / 时间正倒序、上传下载删除与临时下载地址；不执行 SQL。详细说明见 [docs/data-sources/aliyun-oss.md](./docs/data-sources/aliyun-oss.md)
 - **AI 模型自定义**:支持任意 OpenAI 兼容接口(OpenAI / DeepSeek / Ollama / vLLM 等),可配置地址、密钥、模型 ID、temperature、附加参数,多模型随时切换
 - **SQL 编辑器**:行号、快捷键运行(⌘+Enter)、简易格式化、常用查询保存
-- **数据可视化**:查询结果一键切换表格 / 图表(柱状、折线,自动识别数值列)
 - **Git 同步**:将连接信息与 AI 模型配置导出到 Git 仓库,多设备同步
 - **轻量**:Tauri 2 框架,原生 WebView + Rust 后端,体积远小于 Electron 方案
 
@@ -24,10 +23,10 @@ OrbitData 的设计思想参考原生 AI IDE(如 Trae):**以 AI 对话为主要�
 |---|---|
 | 桌面框架 | Tauri 2(Rust) |
 | 前端 | React 18 + TypeScript + Vite + Zustand |
-| 数据库驱动 | sqlx(MySQL / PostgreSQL)、tiberius(SQL Server / TDS)、reqwest(Elasticsearch REST/DSL、ClickHouse HTTP)、redis-rs |
+| 数据库驱动 | sqlx(MySQL / PostgreSQL)、tiberius(SQL Server / TDS)、reqwest(Elasticsearch REST/DSL、ClickHouse HTTP)、redis-rs、rusqlite(SQLite,bundled libsqlite3) |
 | 消息客户端 | rdkafka 0.39 / librdkafka（`cmake-build`、`ssl-vendored`），独立 Kafka 消息工作区；rumqttc 0.25（MQTT 5.0 / 3.1.1、TCP / TLS / WebSocket），独立 MQTT 消息工作区；均不走 SQL 查询协议 |
 | AI 接入 | reqwest 流式调用 OpenAI Chat Completions、OpenAI Responses、Anthropic 接口（兼容旧 Gemini 配置） |
-| 同步 | 系统原生 git |
+| 同步 | 内置 git2（vendored libgit2） |
 
 ## 快速开始
 
@@ -37,33 +36,33 @@ npm run tauri dev     # 开发模式
 npm run tauri build   # 构建发布包
 ```
 
-> 依赖:Node.js ≥ 18、Rust 工具链、CMake 与 C/C++ 构建工具；同步功能需要系统安装 git。Kafka 使用 rdkafka 0.39，启用 `cmake-build`、`ssl-vendored`，编译 librdkafka 与 OpenSSL 源码，需 Perl。macOS 可用 `brew install cmake` 安装 CMake。已通过前端类型检查与 Rust 编译，跨平台打包及真实集群验证仍待完成。
+> 依赖:Node.js ≥ 18、Rust 工具链、CMake 与 C/C++ 构建工具。Git 同步使用内置 libgit2，无需系统安装 git。Kafka 使用 rdkafka 0.39，启用 `cmake-build`、`ssl-vendored`，编译 librdkafka 与 OpenSSL 源码，需 Perl。macOS 可用 `brew install cmake` 安装 CMake。已通过前端类型检查与 Rust 编译，跨平台打包及真实集群验证仍待完成。
 
 ## 界面布局(三列式)
 
 ```
-┌──────────────┃────────────────────────────┃──────────────────┐
-│ 数据库连接     ┃  标签页: 对话 / 查询结果      ┃  SQL 编辑器       │
-│ 数据库对象     ┃  AI 对话流                  ┃  [数据库选择]      │
-│ ├ db         ┃   · SQL 代码块 → 一键运行     ┃  [编辑区+行号]     │
-│ ├ 表 → 字段    ┃   · 结果表格 / 可视化         ┃  [运行/格式化/保存] │
-│ └ …          ┃  [输入框 + 快捷操作]          ┃  [结果 / 可视化]   │
-│ [左栏/右栏/设置]┃                            ┃                  │
-└──────────────┃────────────────────────────┃──────────────────┘
-       ↕ 拖动分隔条              ↕ 拖动分隔条
+┌──────────────┃─────────────────────────────────────────────────┐
+│ 数据库连接     ┃  中栏（可多子面板 / 拖动分屏）                      │
+│ 数据库对象     ┃  ┌ 对话 + SQL 输入 ───────┐ ┌ 查询结果 ────────┐ │
+│ ├ db         ┃  │ [SQL 输入框 ⇱ 执行]     │ │ 结果表格          │ │
+│ ├ 表 → 字段    ┃  │ [AI 对话流]             │ │                  │ │
+│ └ …          ┃  │ [对话输入框]            │ │                  │ │
+│ [左栏/设置]    ┃  └───────────────────────┘ └──────────────────┘ │
+└──────────────┃─────────────────────────────────────────────────┘
+       ↕ 拖动分隔条                         ↕ 拖动分隔条
 ```
 
-- **左栏**:数据库连接 + 对象树(数据库/表/视图/字段,合并为一列);底部一排图标为「收起/展开左栏、收起/展开右栏、设置」
-- **中栏**:对话标签页(主要交互)+ 查询结果标签页(表格/图表)；Kafka 使用独立消息工作区标签页，包含元数据、消息浏览、生产、Topic 管理与消费组管理
-- **右栏**:SQL 编辑器,可独立运行、格式化、保存,结果表格与可视化；Kafka 操作不经 SQL 编辑器
-- **宽度可调**:左栏与中栏、中栏与右栏之间均有分隔条,拖动即可调整宽度(自动记忆);双击分隔条恢复默认宽度
+- **左栏**:数据库连接 + 对象树(数据库/表/视图/字段,合并为一列);底部一排图标为「收起/展开左栏、设置」
+- **中栏**:对话与 SQL 输入合并在同一面板(SQL 输入框在对话输入框上方,旁边图标可放大为弹窗编辑);查询结果在独立子面板中展示
+- **多子面板**:中栏支持多个子面板,标签页可拖拽到任意子面板的上 / 下 / 左 / 右 / 中间完成分屏;分隔条拖动调整比例
+- **宽度可调**:左栏与中栏之间有分隔条,拖动即可调整宽度(自动记忆);双击分隔条恢复默认宽度
 
 ## 使用说明
 
 1. **配置 AI 模型**:设置 → AI 模型 → 添加模型(填接口地址、API Key、模型 ID)
-2. **添加连接**:左栏 `+` → 选择类型(MySQL / PostgreSQL / SQL Server / ClickHouse / Redis / Elasticsearch / Kafka / MQTT)→ 测试并保存。ClickHouse 走 HTTP 接口，协议 http / https 对应端口 8123 / 8443（原生 TCP 9000 不支持），用户名为 `default` 或自定义账号。MQTT 填主机与端口（默认 1883），按需选择 mqtt / mqtts / ws / wss 与 MQTT 版本；保存后右键连接（或双击）打开消息工作区，订阅主题并收发消息。ES 默认端口 9200，主机可填 `https://es.example.com`，HTTPS 证书需受信任，用户名/密码可留空（匿名访问）或用于 Basic Auth。SQL Server 默认端口 1433，使用 SQL Server 身份认证（用户名 / 密码），见下方专门说明。国产 / 信创库尚未开放独立入口：PolarDB 可先选 MySQL 类型、Kingbase / openGauss 可先选 PostgreSQL 类型并填实际端口（未验证），达梦 / GBase / Oscar 需要等待连接器落地
+2. **添加连接**:左栏 `+` → 选择类型(MySQL / PostgreSQL / SQL Server / ClickHouse / Redis / Elasticsearch / Kafka / MQTT / SQLite)→ 测试并保存。SQLite 无需服务器:直接选择或填写本机 `.db` 文件路径,「测试连接」即校验文件(文件需已存在,可在终端执行 `sqlite3 路径.db` 新建)。ClickHouse 走 HTTP 接口，协议 http / https 对应端口 8123 / 8443（原生 TCP 9000 不支持），用户名为 `default` 或自定义账号。MQTT 填主机与端口（默认 1883），按需选择 mqtt / mqtts / ws / wss 与 MQTT 版本；保存后右键连接（或双击）打开消息工作区，订阅主题并收发消息。ES 默认端口 9200，主机可填 `https://es.example.com`，HTTPS 证书需受信任，用户名/密码可留空（匿名访问）或用于 Basic Auth。SQL Server 默认端口 1433，使用 SQL Server 身份认证（用户名 / 密码），见下方专门说明。国产 / 信创库尚未开放独立入口：PolarDB 可先选 MySQL 类型、Kingbase / openGauss 可先选 PostgreSQL 类型并填实际端口（未验证），达梦 / GBase / Oscar 需要等待连接器落地
 3. **开始对话**:选中连接后直接向 AI 提问,SQL 或 `elasticsearch` 代码块点击「运行」即可执行并打开结果页。ES 也可右键索引预览，或在控制台输入 `GET /_cluster/health`；查询支持 `POST /example-index/_search` 后换行填写 JSON，选中索引后可直接填写 JSON DSL；当前仅支持只读接口
-4. **同步配置**:设置 → Git 同步 → 配置仓库路径(可填远程 URL)→ 初始化 → 提交并推送;其他设备「拉取同步」即可还原全部连接与模型配置
+4. **同步配置**:设置 → Git 同步 → 填写远程仓库 URL、分支（留空为 main，不存在时自动新建）、用户名、密码/访问令牌与邮箱 → 测试连接 → 保存 → 点击「同步」。同步会拉取远程配置并与本地合并；同一连接（主机 + 端口 + 名称相同）内容不同时，会提示保留远程或本地
 
 ### Kafka 工作区（代码完成，真实集群验收待进行）
 

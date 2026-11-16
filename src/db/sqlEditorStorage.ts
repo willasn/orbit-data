@@ -10,6 +10,17 @@ export interface SqlHistoryEntry {
   sql: string;
   /** 归档时间（毫秒时间戳） */
   at: number;
+  /** 归档时的数据库上下文，用于从历史会话回带 */
+  database?: string;
+  table?: string;
+  column?: string;
+}
+
+/** 归档 SQL 时一并保存的上下文 */
+export interface SqlHistoryContext {
+  database?: string;
+  table?: string;
+  column?: string;
 }
 
 const DRAFTS_KEY = "orbit-data.sql-drafts";
@@ -68,18 +79,46 @@ export function historyOf(connId: string): SqlHistoryEntry[] {
   return read<SqlHistoryEntry[]>(HISTORY_KEY, []).filter((e) => e.connId === connId);
 }
 
+/** 全部连接的历史（新→旧），供中间面板的「历史会话」统一展示 */
+export function allHistory(): SqlHistoryEntry[] {
+  return [...read<SqlHistoryEntry[]>(HISTORY_KEY, [])].sort((a, b) => b.at - a.at);
+}
+
 /**
  * 追加一条历史并返回该连接的最新列表。
- * 空内容不入库；与当前连接最近一条完全相同时跳过，避免重复归档。
+ * 空内容不入库；与当前连接最近一条完全相同时只刷新上下文，避免重复归档。
  */
-export function pushHistory(connId: string, connName: string, sql: string): SqlHistoryEntry[] {
+export function pushHistory(
+  connId: string,
+  connName: string,
+  sql: string,
+  ctx?: SqlHistoryContext,
+): SqlHistoryEntry[] {
   if (!sql.trim()) return historyOf(connId);
   const all = read<SqlHistoryEntry[]>(HISTORY_KEY, []);
   const latest = all.find((e) => e.connId === connId);
-  if (latest?.sql === sql) return all.filter((e) => e.connId === connId);
+  if (latest?.sql === sql) {
+    latest.connName = connName;
+    latest.database = ctx?.database;
+    latest.table = ctx?.table;
+    latest.column = ctx?.column;
+    write(HISTORY_KEY, all);
+    return all.filter((e) => e.connId === connId);
+  }
 
   const perConn = new Map<string, number>();
-  const list = [{ connId, connName, sql, at: Date.now() }, ...all]
+  const list = [
+    {
+      connId,
+      connName,
+      sql,
+      at: Date.now(),
+      database: ctx?.database,
+      table: ctx?.table,
+      column: ctx?.column,
+    },
+    ...all,
+  ]
     .filter((entry) => {
       const count = (perConn.get(entry.connId) ?? 0) + 1;
       perConn.set(entry.connId, count);
@@ -97,4 +136,9 @@ export function removeHistoryEntry(connId: string, at: number): SqlHistoryEntry[
   );
   write(HISTORY_KEY, list);
   return list.filter((e) => e.connId === connId);
+}
+
+/** 清空全部连接的 SQL 历史 */
+export function clearHistory() {
+  write(HISTORY_KEY, []);
 }

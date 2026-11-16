@@ -144,6 +144,10 @@
 .mqtt-search { display: inline-flex; align-items: center; gap: 5px; flex: 1; min-width: 150px; border: 1px solid var(--border-soft); border-radius: 6px; background: var(--bg-soft); padding: 0 8px; color: var(--text-faint); }
 .mqtt-search input { flex: 1; border: 0; background: transparent; padding: 6px 0; }
 .mqtt-check { display: inline-flex; align-items: center; gap: 5px; color: var(--text-dim); font-size: 11px; }
+.mqtt-check.inline select { margin-left: 6px; padding: 4px 6px; font-size: 11px; }
+.mqtt-sub-options { display: flex; flex-direction: column; gap: 6px; padding: 4px 0; }
+.mqtt-props-input { margin-top: 6px; font-size: 11.5px; }
+.mqtt-msg-props { padding: 0 10px 2px; color: var(--text-faint); font: 10.5px var(--mono); word-break: break-all; }
 .mqtt-count { color: var(--text-faint); font: 10.5px var(--mono); }
 .mqtt-toolbar select { padding: 5px 7px; font-size: 11px; }
 
